@@ -135,11 +135,13 @@ account data aren't copied. To run it from a terminal instead, quit both browser
 
 ### From Chrome
 
-**ArcMod → Import from Chrome…** turns each Google Chrome profile into an ArcMod profile with a
-Space of the same name. Each one gets that profile's cookies, site storage, extensions, history
-and passwords, and its bookmarks are pinned in the Space as a **Bookmarks** folder that mirrors
-Chrome's folders (Bookmarks Bar, Other Bookmarks, Mobile Bookmarks). Terminal asks ArcMod to quit,
-waits for you to quit Chrome, imports and reopens ArcMod.
+**ArcMod → Import from Chrome…** turns Google Chrome profiles into ArcMod profiles, each with a
+Space of the same name. Terminal lists the profiles not imported yet, all selected; pick any of
+them. Each one gets that profile's cookies, site storage, extensions, history and passwords, its
+bookmarks are pinned in the Space as a **Bookmarks** folder that mirrors Chrome's folders
+(Bookmarks Bar, Other Bookmarks, Mobile Bookmarks), and the Space gets one of Arc's icons that no
+other Space uses. Profiles with the same name are told apart by their account, as in Chrome.
+Then Terminal asks ArcMod to quit, waits for you to quit Chrome, imports and reopens ArcMod.
 
 From a terminal, with both browsers closed:
 
@@ -147,6 +149,7 @@ From a terminal, with both browsers closed:
 bun tools/import-chrome-profiles.ts --list                  # Chrome's profile folders and names
 bun tools/import-chrome-profiles.ts                         # import every profile not imported yet
 bun tools/import-chrome-profiles.ts --profile "Profile 2"   # or only some
+bun tools/import-chrome-profiles.ts --choose                # or pick them in a list
 ```
 
 - macOS asks to read "Chrome Safe Storage". Choose **Allow**, not "Always Allow".
