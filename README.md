@@ -182,7 +182,9 @@ browsers don't take focus or touch your own ArcMod windows.
 
 Passkeys on this Mac live in the Keychain, and macOS gives a Keychain group only to apps signed by
 the team that owns it. Arc used its own team's groups; an ad hoc copy has none. With a paid Apple
-Developer account you can sign ArcMod yourself, and the builder moves those groups to your team.
+Developer account you can sign ArcMod yourself: the build entitles the same groups under your team,
+and ArcMod renames Arc's groups to them as it uses the Keychain. Arc's engine itself stays
+unchanged, because Widevine (DRM video) checks it against Arc's signature file.
 
 1. In [Certificates, Identifiers & Profiles](https://developer.apple.com/account/resources/identifiers/list),
    register a **macOS App ID** for ArcMod's bundle ID, `dev.drshnk.arcmod` (`tools/agent-session.ts`).

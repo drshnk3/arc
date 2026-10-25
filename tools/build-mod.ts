@@ -13,7 +13,7 @@
 //   bun tools/build-mod.ts [--source /Applications/Arc.app] [--validation | --agent <slug>]
 //                          [--engine <ArcCore.framework> | --engine release]   (Arc Engine; see README)
 
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 import { hostResolverRules, servicePolicyHeader } from "./service-policy";
@@ -25,7 +25,7 @@ import { currentChannel, describeArgs } from "./update";
 import { verifyShippedShortcutCoverage } from "./shortcut-coverage";
 import { parseBuildOptions, sessionIdentity } from "./agent-session";
 import { acquireLease } from "./agent-lease";
-import { retargetKeychainGroups, signingConfigPath, signingFor } from "./signing";
+import { signingConfigPath, signingFor } from "./signing";
 
 // All bundles share generated headers/dylib, so serialize complete builds.
 const buildLease = acquireLease("global", join(homedir(), ".arcmod", "build-locks"));
@@ -102,11 +102,11 @@ sh([
 const sdk = sh(["xcrun", "--show-sdk-path"]).trim();
 sh([
   "clang", "-dynamiclib", "-arch", "arm64", "-fobjc-arc", "-Wall", "-Wextra", "-Werror", "-mmacosx-version-min=13.0",
-  "-framework", "AppKit", "-framework", "CoreServices", "-I", join(root, "build"), "-install_name", DYLIB_INSTALL, "-o", dylib,
+  "-framework", "AppKit", "-framework", "CoreServices", "-framework", "Security", "-I", join(root, "build"), "-install_name", DYLIB_INSTALL, "-o", dylib,
   // The Swift runtime ships with macOS 13.
   "-L", join(sdk, "usr/lib/swift"), "-Wl,-rpath,/usr/lib/swift",
   join(root, "mods/hello/ArcMod.m"), join(root, "mods/local/ServicePolicy.m"),
-  join(root, "mods/local/ShortcutPolicy.m"), switches,
+  join(root, "mods/local/ShortcutPolicy.m"), join(root, "mods/local/KeychainGroups.m"), switches,
 ]);
 
 step(`APFS-clone app → ${relative(root, OUT)}`);
@@ -193,14 +193,8 @@ sh(["cp", dylib, join(OUT, "Contents/Frameworks/ArcMod.dylib")]);
 
 let entitlements: string | undefined;
 if (signing) {
-  step(`keychain access groups: Arc's team → ${signing.profile.team}`);
-  for (const binary of [exe, join(OUT, "Contents/Frameworks/ArcCore.framework/Versions/A/ArcCore")]) {
-    const result = retargetKeychainGroups(readFileSync(binary), signing.profile.team);
-    // Chromium's passkey store lives in ArcCore; without its group, Touch ID passkeys stay unavailable.
-    if (result.count === 0 && binary !== exe) throw new Error(`no keychain access groups found in ${relative(OUT, binary)}`);
-    writeFileSync(binary, result.binary);
-    console.log(`  ${relative(OUT, binary)}: ${result.count} group names`);
-  }
+  // Arc's keychain group names are redirected to this team at runtime (mods/local/KeychainGroups.m), not in the
+  // binaries: Widevine checks ArcCore's bytes against ArcCore.sig.
   entitlements = join(root, "build", `${appName}.entitlements`);
   writeFileSync(entitlements, JSON.stringify(signing.entitlements));
   sh(["plutil", "-convert", "xml1", entitlements]);

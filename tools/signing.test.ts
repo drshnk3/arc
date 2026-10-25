@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ARC_TEAM, BROWSER_PASSKEYS, entitlementsFor, findIdentity, retargetKeychainGroups, validateProfile, type Profile } from "./signing";
+import { BROWSER_PASSKEYS, entitlementsFor, findIdentity, validateProfile, type Profile } from "./signing";
 
 const profile = (overrides: Partial<Profile> = {}): Profile => ({
   name: "ArcMod Developer ID",
@@ -70,19 +70,5 @@ describe("provisioning profile", () => {
   test("rejects a profile that doesn't allow the keychain groups", () => {
     const narrow = profile({ entitlements: { ...profile().entitlements, "keychain-access-groups": ["XR7L4K435B.dev.drshnk.arcmod"] } });
     expect(() => entitlementsFor(narrow, "dev.drshnk.arcmod")).toThrow("keychain groups");
-  });
-});
-
-describe("keychain group retargeting", () => {
-  test("rewrites only Arc's browser groups, in place", () => {
-    const input = Buffer.from(`\0${ARC_TEAM}.company.thebrowser.browser.webauthn\0${ARC_TEAM}.com.google.common.folsom\0${ARC_TEAM}\0${ARC_TEAM}.company.thebrowser.browser.webauthn-uvk\0`);
-    const { binary, count } = retargetKeychainGroups(input, "XR7L4K435B");
-    expect(count).toBe(2);
-    expect(binary.length).toBe(input.length);
-    expect(binary.toString()).toBe(`\0XR7L4K435B.company.thebrowser.browser.webauthn\0${ARC_TEAM}.com.google.common.folsom\0${ARC_TEAM}\0XR7L4K435B.company.thebrowser.browser.webauthn-uvk\0`);
-  });
-
-  test("refuses a team ID of another length", () => {
-    expect(() => retargetKeychainGroups(Buffer.from(""), "SHORT")).toThrow();
   });
 });

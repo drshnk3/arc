@@ -3,13 +3,13 @@
 // entitlement, use iCloud Keychain passkeys. Configured in ~/.arcmod/signing.json (see README → Passkeys):
 //   { "identity": "Developer ID Application: Your Name (TEAMID)", "profile": "/path/to/ArcMod.provisionprofile" }
 // Keychain items belong to a team: Arc's engine and app name Arc's team in their keychain access groups, so the
-// build swaps in your team ID (the same length) and entitles those groups.
+// build entitles the same groups under your team and ArcMod.dylib renames them at runtime
+// (mods/local/KeychainGroups.m). The binaries stay as they are: Widevine checks ArcCore against ArcCore.sig.
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
-export const ARC_TEAM = "S6N382Y83G";
 const GROUP_PREFIX = ".company.thebrowser.browser.";
 // Chromium's on-device credential stores: passkeys, their user-verification keys, device-bound session keys and
 // secure payment confirmation.
@@ -123,18 +123,4 @@ export const signingFor = (bundleId: string, config = readSigningConfig()): Sign
   const profile = readProfile(config.profile);
   validateProfile(profile, bundleId, identity);
   return { identity, profilePath: config.profile, profile, entitlements: entitlementsFor(profile, bundleId) };
-};
-
-// Rewrites Arc's team in its keychain access group names; the team IDs have the same length, so nothing moves.
-export const retargetKeychainGroups = (binary: Buffer, team: string): { readonly binary: Buffer; readonly count: number } => {
-  if (team.length !== ARC_TEAM.length) throw new Error(`team ${team} isn't ${ARC_TEAM.length} characters`);
-  const from = Buffer.from(`${ARC_TEAM}${GROUP_PREFIX}`);
-  const to = Buffer.from(`${team}${GROUP_PREFIX}`);
-  const out = Buffer.from(binary);
-  let count = 0;
-  for (let at = out.indexOf(from); at !== -1; at = out.indexOf(from, at + from.length)) {
-    to.copy(out, at);
-    count++;
-  }
-  return { binary: out, count };
 };
