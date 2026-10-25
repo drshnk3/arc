@@ -15,6 +15,15 @@ export interface SessionIdentity {
   readonly agent: string | undefined;
 }
 
+// The everyday ArcMod's bundle ID, registered as an App ID for signing (tools/signing.ts). Before, it was Arc's
+// with a ".mod" suffix; tools/build-mod.ts moves that build's settings over once.
+export const EVERYDAY_BUNDLE_ID = "dev.drshnk.arcmod";
+export const LEGACY_EVERYDAY_BUNDLE_ID = "company.thebrowser.Browser.mod";
+
+// Settings → ArcMod → Agent browser tools (on unless turned off): whether tools/agent-mcp.ts may open sessions.
+export const agentToolsEnabled = (): boolean =>
+  Bun.spawnSync(["defaults", "read", EVERYDAY_BUNDLE_ID, "ArcModAgentToolsEnabled"]).stdout.toString().trim() !== "0";
+
 export const sessionIdentity = (validation = false, agent?: string): SessionIdentity => {
   if (validation && agent !== undefined) throw new Error("--validation and --agent cannot be combined");
   if (agent !== undefined) {
@@ -28,7 +37,7 @@ export const sessionIdentity = (validation = false, agent?: string): SessionIden
   }
   return {
     appName: validation ? "ArcModValidation" : "ArcMod",
-    bundleId: validation ? "company.thebrowser.Browser.mod.validation" : "dev.drshnk.arcmod",
+    bundleId: validation ? "company.thebrowser.Browser.mod.validation" : EVERYDAY_BUNDLE_ID,
     // macOS shows a localized name (ArcMod menu → Rename App…) only when this matches the bundle's folder name.
     displayName: validation ? "Arc Mod Test" : "ArcMod",
     agent: undefined,
@@ -42,6 +51,8 @@ export interface BuildOptions {
   readonly engine?: string;
   // Leave the build staged (tools/build-paths.ts) instead of replacing the app; tools/update.ts swaps it later.
   readonly stageOnly?: true;
+  // Keep the everyday ArcMod in build/ (launched with tools/run-mod.sh --debug) instead of installing it.
+  readonly debug?: true;
 }
 
 export const parseBuildOptions = (args: readonly string[]): BuildOptions => {
@@ -50,15 +61,17 @@ export const parseBuildOptions = (args: readonly string[]): BuildOptions => {
   let agent: string | undefined;
   let engine: string | undefined;
   let stageOnly = false;
+  let debug = false;
   const seen = new Set<string>();
   for (let index = 0; index < args.length; index++) {
     const flag = args[index]!;
-    if (!["--source", "--validation", "--agent", "--engine", "--stage-only"].includes(flag)) throw new Error(`unrecognized build argument: ${flag}`);
+    if (!["--source", "--validation", "--agent", "--engine", "--stage-only", "--debug"].includes(flag)) throw new Error(`unrecognized build argument: ${flag}`);
     if (seen.has(flag)) throw new Error(`duplicate build argument: ${flag}`);
     seen.add(flag);
-    if (flag === "--validation" || flag === "--stage-only") {
+    if (flag === "--validation" || flag === "--stage-only" || flag === "--debug") {
       if (flag === "--validation") validation = true;
-      else stageOnly = true;
+      else if (flag === "--stage-only") stageOnly = true;
+      else debug = true;
       continue;
     }
     const value = args[++index];
@@ -68,5 +81,6 @@ export const parseBuildOptions = (args: readonly string[]): BuildOptions => {
     else agent = validateAgentSlug(value);
   }
   const session = sessionIdentity(validation, agent);
-  return { source, session, ...(engine === undefined ? {} : { engine }), ...(stageOnly ? { stageOnly: true as const } : {}) };
+  return { source, session, ...(engine === undefined ? {} : { engine }), ...(stageOnly ? { stageOnly: true as const } : {}),
+    ...(debug ? { debug: true as const } : {}) };
 };

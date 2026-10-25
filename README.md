@@ -27,22 +27,28 @@ git lfs install
 git clone https://github.com/CryogenicPlanet/arc.git
 cd arc
 bun install
-bun tools/build-mod.ts   # builds and installs /Applications/ArcMod.app
+bun tools/build-mod.ts   # builds ArcMod and puts it in /Applications
 open -a ArcMod
 ```
 
-That's it. The build takes about a minute the first time and a few seconds after that.
+That's it. From now on, open ArcMod like any other app. The build takes about a minute the
+first time and a few seconds after that.
 
 What just happened? ArcMod only builds from Arc **1.168.0**, and the repo includes a copy of it
 in `bin/`. The builder uses `/Applications/Arc.app` while it's still 1.168.0; otherwise it
-unpacks the included copy into `build/source/` once. Then it patches a copy of that app, signs it
-on your Mac and installs it as `/Applications/ArcMod.app`.
+unpacks the included copy into `build/source/` once. Then it patches a copy of that app, signs
+it on your Mac and installs it as `/Applications/ArcMod.app` (`~/Applications` if you can't write
+to `/Applications`).
 
-- Open ArcMod like any app: from Applications, Launchpad, Spotlight or the Dock, or make it your
-  default browser. It applies the service blocking that Chromium needs however it's opened.
-  `tools/run-mod.sh` still works too. To install somewhere else, set `ARCMOD_INSTALL_DIR`
-  (for example `~/Applications`) for the build, updates and `tools/run-mod.sh`.
 - Quit ArcMod before you rebuild.
+- ArcMod keeps your cookies and saved passwords under the Keychain item Arc uses, "Arc Safe
+  Storage". The first time a new build opens, macOS asks to let ArcMod use it: enter your login
+  password and choose **Always Allow**. Each build is signed on your Mac, so macOS asks again
+  after you rebuild or update.
+- ArcMod builds from before October 25, 2026 used Chromium's fixed test key instead. The first
+  time a newer build opens on that data, it opens Terminal and moves your saved cookies and
+  passwords to the Keychain (`bun tools/keychain-profile.ts`; macOS asks to let `security` read
+  "Arc Safe Storage"), then reopens.
 - The clone downloads about 730 MB through Git LFS: about 380 MB of Arc in `bin/` and about
   350 MB of reverse-engineering files. To skip the latter, clone with
   `GIT_LFS_SKIP_SMUDGE=1`, then run `git lfs pull --include="bin/*"`.
@@ -70,25 +76,15 @@ If ArcMod is open, the update builds first and then waits for you to quit it. It
 checkout without local changes. Arc itself never updates: ArcMod stays on
 Arc 1.168.0's app.
 
-## Which branch?
-
-| Branch | What you get |
-| --- | --- |
-| `master` | Everything below: no sign-in, service blocking, one Little Arc, performance tweaks, agent browser tools, app icons and the ArcMod menu. |
-| `no-login` | Only what's needed to use Arc without an account, plus service blocking. |
-
-Releases are tagged `vX.Y.Z` on `master` and `vX.Y.Z-no-login` on `no-login`.
-
 ## What it does
 
 - **No sign-in.** The account onboarding screen never opens. Windows, tabs, links, keyboard
   shortcuts and Settings work without an account. No fake account or token is created; Arc's
   own account checks are left in place.
 - **Blocks The Browser Company's services.** Requests from Arc's native code to its backend,
-  sync, LaunchDarkly, Sentry, Segment and Datadog fail locally. Websites that use Firebase or
-  similar services keep working.
+  sync, LaunchDarkly, Sentry, Segment and Datadog fail locally.
 - **One Little Arc.** Links reuse the open Little Arc window instead of opening a new one each
-  time.
+  time. Turn it off in **Settings → ArcMod** to get Arc's behavior back.
 - **Lighter.** State files are written as compact JSON, LaunchDarkly starts offline and some
   background telemetry is turned off.
 - **Arc's app icons.** All seven icons in **Settings → Icon** are available, not just the
@@ -97,25 +93,39 @@ Releases are tagged `vX.Y.Z` on `master` and `vX.Y.Z-no-login` on `no-login`.
   background browser. See [Agent browser tools](#agent-browser-tools).
 - **Separate data.** ArcMod keeps everything in `~/Library/Application Support/ArcMod`.
 
-## Make it look like Arc
+## Settings
 
-The **ArcMod** menu in the menu bar has a few switches:
+ArcMod's own settings are in **Settings → ArcMod** (also **ArcMod → ArcMod Settings…** in the
+menu bar):
 
-- **Show ARC MOD in Sidebar** turns the `ARC MOD` marker at the bottom of the sidebar on or
-  off.
-- **Show MOD Badge on App Icon** turns the badge on the Dock and Finder icon on or off.
-- **Rename App…** changes the name in the menu bar, Dock and Finder, for example back to
-  "Arc". It takes effect the next time ArcMod starts, and rebuilds keep it. ArcMod's data stays
-  in `~/Library/Application Support/ArcMod` whatever you call it.
+- **Show ARC MOD in the sidebar** and **Show the MOD badge on the app icon** turn the marker at
+  the bottom of the sidebar and the badge on the Dock and Finder icon on or off.
+- **App name** changes the name in the menu bar, Dock and Finder, for example back to "Arc". It
+  takes effect the next time ArcMod starts, and rebuilds keep it. ArcMod's data stays in
+  `~/Library/Application Support/ArcMod` whatever you call it.
+- **One Little Arc** makes every link reuse the open Little Arc. Turn it off for Arc's behavior.
+- **Agent browser tools** lets coding agents open their own background browsers.
+- **Import from Arc** and **Updates** are there too.
+
+To use ArcMod as plain Arc without an account, turn off the marker, the badge, One Little Arc
+and the agent tools. Account-free use, service blocking and the performance changes stay on.
 
 ## What you give up
+
+We're working on bringing back what we can.
 
 - Arc account features: sync across devices, Arc Max AI features, and calendar and email
   previews.
 - iCloud and push notifications. The copy is re-signed on your Mac, and Apple ties those
   features to Arc's original signature. Passkeys on this Mac work if you sign ArcMod with your own
   Apple Developer certificate (see [Passkeys](#passkeys)).
-- Arc's own updates. ArcMod stays on Arc 1.168.0 and updates only from this repo.
+- Arc's own updates. ArcMod stays on Arc 1.168.0's app and updates only from this repo.
+
+> **Security updates.** By default ArcMod runs on Arc's own engine, which stops getting Chromium
+> security fixes when Arc shuts down on 2026-12-22. [Arc Engine](#arc-engine-experimental) is how
+> ArcMod keeps getting them: each Chromium security release becomes a new Arc Engine build, an
+> ArcMod release pins it, and updating ArcMod picks it up. Until Arc Engine is ready for daily
+> use, it's something you opt into.
 
 ## Bring your logins over
 
@@ -127,11 +137,10 @@ This copies cookies, site storage, extensions, history and permissions. Sidebar 
 account data aren't copied. To run it from a terminal instead, quit both browsers, then run
 `bun tools/import-arc-data.ts`.
 
-- macOS asks to read "Arc Safe Storage". Choose **Allow**, not "Always Allow".
-- Your Arc data is only read. ArcMod's previous profile is kept as
-  `Default.pre-import-<timestamp>`.
-- ArcMod uses Chromium's mock keychain, so imported logins are protected only by a public key.
-  Don't import on a shared Mac.
+- Your Arc data is only read, and nothing is decrypted: ArcMod uses Arc's own Keychain item, so
+  the copy works as it is. ArcMod's previous profile is kept as `Default.pre-import-<timestamp>`.
+- Test (`--validation`) and agent builds keep their data under Chromium's fixed test key, so
+  importing into them isn't offered. Don't sign in to real accounts in them.
 
 ### From Chrome
 
@@ -170,7 +179,8 @@ codex mcp add arcmod -- /absolute/path/to/bun /absolute/path/to/arc/tools/agent-
 
 Call `open_session` to get a fresh background browser with its own profile, then use
 `open_tab`, `read_page`, `click`, `type`, `navigate`, `screenshot` and `wait_for`. Agent
-browsers don't take focus or touch your own ArcMod windows.
+browsers don't take focus or touch your own ArcMod windows. To turn the tools off, use
+**Settings → ArcMod → Agent browser tools**; `open_session` then refuses.
 [computer-use-tools.md](notes/computer-use-tools.md) covers every tool and its limits.
 
 ## Passkeys
@@ -265,13 +275,15 @@ To try it, build a separate test copy of ArcMod on the prebuilt engine:
 
 ```sh
 bun tools/build-mod.ts --validation --engine release   # downloads about 160 MB once
-tools/run-mod.sh --validation
+open build/ArcModValidation.app
 ```
 
 `--engine release` downloads the engine release this commit pins
 (`resources/engine-release.json`), checks its SHA-256 and swaps it in for Arc's engine. The
 test copy, ArcModValidation, keeps its own data. Keep it that way for now: Arc's engine for
-1.168.0 is Chromium 155, and opening a profile with Chromium 156 upgrades it for good.
+1.168.0 is Chromium 155, and opening a profile with Chromium 156 upgrades it for good. The
+everyday ArcMod also refuses an engine that keeps its keys under "Chromium Safe Storage" instead
+of Arc's item, which includes the v0.1.0 release.
 
 To build the engine yourself, see
 [Arc Engine's README](https://github.com/CryogenicPlanet/arc-engine#build-it), then pass its
@@ -284,6 +296,9 @@ bun run typecheck
 bun run lint
 bun run test
 ```
+
+`bun tools/build-mod.ts --debug` keeps ArcMod in `build/ArcMod.app` instead of installing it;
+launch that one with `tools/run-mod.sh --debug`.
 
 Binary tests run against `bin/Arc.arm64`, the original Arc 1.168.0 executable, stored in Git
 LFS because Arc's auto-update replaces the installed copy. They skip when the file is missing.

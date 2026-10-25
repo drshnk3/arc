@@ -1,26 +1,77 @@
-// Imports Google Chrome profiles into ArcMod. Each Chrome profile becomes its own ArcMod profile (cookies, site
-// storage, extensions, history, passwords, bookmarks) with a Space of the same name, so its sites stay signed in.
-// Its bookmarks are pinned in that Space as a "Bookmarks" folder that mirrors Chrome's folders.
+// Imports Google Chrome profiles into the everyday ArcMod. Each Chrome profile becomes its own ArcMod profile
+// (cookies, site storage, extensions, history, passwords, bookmarks) with a Space of the same name, so its sites stay
+// signed in. Its bookmarks are pinned in that Space as a "Bookmarks" folder that mirrors Chrome's folders.
 //   bun tools/import-chrome-profiles.ts [--list [--json]] [--choose] [--profile <Chrome profile folder>]...
-//                                       [--validation] [--quit-arcmod] [--relaunch]
+//                                       [--quit-arcmod] [--relaunch [--app <ArcMod.app>]]
+//   bun tools/import-chrome-profiles.ts --repair [--quit-arcmod] [--relaunch [--app <ArcMod.app>]]
 // Without --profile it imports every Chrome profile that isn't imported yet; --choose first asks which of them, in a
-// macOS list dialog (what ArcMod → Import from Chrome… runs). Each new Space gets an Arc icon no other
-// Space uses. --quit-arcmod and --relaunch work as
-// in tools/import-arc-data.ts. Chrome has to be closed. Chrome is only read; ArcMod's sidebar and profile list
-// are backed up next to themselves before they change.
+// macOS list dialog (what ArcMod → Import from Chrome… runs). Each new Space gets an Arc icon no other Space uses.
+// --quit-arcmod and --relaunch work as in tools/import-arc-data.ts. Chrome has to be closed. Chrome is only read;
+// ArcMod's sidebar and profile list are backed up next to themselves before they change.
+// Chrome encrypts secrets with its Keychain item "Chrome Safe Storage", the everyday ArcMod with "Arc Safe Storage"
+// (tools/oscrypt.ts); every database in the profile is re-encrypted, Network/Cookies included. Test builds keep
+// their data under Chromium's test key, so real sessions are never imported into them. --repair re-encrypts the
+// Chrome values still left in profiles imported before 2026-10-25, when Network/ was skipped.
 // A Space names its profile by folder and machine: {"custom": {"_0": {"directoryBasename", "machineID"}}}, with
 // machineID from ArcMod's defaults (checked against Arc 1.168.0: tabs in that Space use that Chromium profile).
 import { randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sessionIdentity } from "./agent-session";
-import { copyProfile, excluded, isRunning, keychainPassword, MOCK_KEYCHAIN_PASSWORD, recrypter, waitUntilClosed } from "./chromium-profile";
+import { flagValue } from "./build-paths";
+import { arcSafeStoragePassword, databases } from "./keychain-profile";
+import { betweenKeys, recryptDatabase, recryptJsonText, type Recrypter } from "./oscrypt";
 
 const support = join(process.env.HOME ?? "", "Library/Application Support");
 export const CHROME_ROOT = join(support, "Google/Chrome");
 const CHROME_PROCESS = "Google Chrome[.]app/Contents/MacOS/Google Chrome( |$)";
-// Chrome keeps these shader and script caches in the profile; ArcMod rebuilds them.
-const skip = new Set([...excluded, "Code Cache", "DawnCache", "GrShaderCache", "ShaderCache"]);
+// Tab sessions, caches and Google sync/push identities that belong to Chrome; ArcMod rebuilds the caches.
+const skip = new Set([
+  "LOCK", "LOG", "LOG.old", "GPUCache", "DawnGraphiteCache", "DawnWebGPUCache", "Code Cache", "DawnCache", "GrShaderCache",
+  "ShaderCache", "Sessions", "Session Storage", "Sync Data", "trusted_vault.pb", "passkey_enclave_state", "GCM Store",
+]);
+
+const run = (command: string, args: readonly string[]): string => {
+  const result = Bun.spawnSync([command, ...args], { stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0) throw new Error(`${command} failed: ${result.stderr.toString().trim()}`);
+  return result.stdout.toString();
+};
+
+const isRunning = (pattern: string): boolean => Bun.spawnSync(["pgrep", "-f", pattern]).exitCode === 0;
+
+const waitUntilClosed = async (pattern: string, message: string): Promise<void> => {
+  if (!isRunning(pattern)) return;
+  console.log(message);
+  while (isRunning(pattern)) await Bun.sleep(500);
+};
+
+// Chrome's Keychain password, only held in memory: choose "Allow", not "Always Allow".
+const chromeSafeStoragePassword = (): string => run("security", ["find-generic-password", "-w", "-s", "Chrome Safe Storage", "-a", "Chrome"]).trim();
+
+// Re-encrypts every database and preference file under `folder`; returns how many values moved.
+export const recryptProfile = (folder: string, crypto: Recrypter): number => {
+  let moved = 0;
+  for (const path of databases(folder)) {
+    for (const [column, tally] of recryptDatabase(path, crypto)) {
+      if (tally.converted > 0) console.log(`  ${path.slice(folder.length + 1)}: ${column} ${tally.converted}`);
+      moved += tally.converted;
+    }
+  }
+  for (const path of ["Preferences", "Secure Preferences"].map((file) => join(folder, file))) {
+    if (!existsSync(path)) continue;
+    const preferences = recryptJsonText(readFileSync(path, "utf8"), crypto);
+    if (preferences.converted > 0) writeFileSync(path, preferences.text, { mode: 0o600 });
+    moved += preferences.converted;
+  }
+  return moved;
+};
+
+// Copies a closed Chrome profile into the new folder `staging` and moves its secrets to ArcMod's key.
+const copyProfile = (source: string, staging: string, crypto: Recrypter): void => {
+  run("mkdir", ["-m", "700", staging]);
+  for (const entry of readdirSync(source).filter((name) => !skip.has(name))) run("cp", ["-cRp", join(source, entry), join(staging, entry)]);
+  console.log(`  ${recryptProfile(staging, crypto)} values re-encrypted for ArcMod`);
+};
 
 export interface ChromeProfile {
   readonly directory: string;
@@ -200,15 +251,25 @@ const parseArgs = (args: readonly string[]): { readonly flags: ReadonlySet<strin
   const profiles: string[] = [];
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
-    if (arg === "--profile") {
+    if (arg === "--profile" || arg === "--app") {
       const value = args[++index];
-      if (!value || value.startsWith("--")) throw new Error("missing value for --profile");
-      profiles.push(value);
-    } else if (["--list", "--json", "--choose", "--validation", "--quit-arcmod", "--relaunch"].includes(arg)) flags.add(arg);
+      if (!value || value.startsWith("--")) throw new Error(`missing value for ${arg}`);
+      if (arg === "--profile") profiles.push(value);
+    } else if (arg === "--validation") {
+      throw new Error("test builds keep their data under Chromium's fixed test key; import only into the everyday ArcMod");
+    } else if (["--list", "--json", "--choose", "--repair", "--quit-arcmod", "--relaunch"].includes(arg)) flags.add(arg);
     else throw new Error(`unrecognized argument: ${arg}`);
   }
   return { flags, profiles };
 };
+
+// ArcMod profile folders that Spaces made by this import use.
+const importedProfileFolders = (sidebar: Json): readonly string[] =>
+  ((spacesContainer(sidebar).spaces as unknown[])
+    .filter((space): space is { id: string; profile?: { custom?: { _0?: { directoryBasename?: unknown } } } } =>
+      typeof space === "object" && space !== null && String((space as { id?: unknown }).id).startsWith("arcmod.chrome-import."))
+    .map((space) => space.profile?.custom?._0?.directoryBasename)
+    .filter((folder): folder is string => typeof folder === "string"));
 
 // Shows macOS's list dialog with every label selected; returns the labels left selected (none when cancelled).
 export type ChooseFromList = (labels: readonly string[], prompt: string) => readonly string[];
@@ -241,9 +302,23 @@ export const chooseProfiles = (pending: readonly ChromeProfile[], imported: numb
 const main = async (args: readonly string[]): Promise<void> => {
   const { flags, profiles: listed } = parseArgs(args);
   let requested = listed;
-  const session = sessionIdentity(flags.has("--validation"));
-  const all = chromeProfiles(readJson(join(CHROME_ROOT, "Local State")));
+  const session = sessionIdentity();
+  const mod = `(^|/)${session.appName}[.]app/Contents/MacOS/Arc( |$)`;
   const sidebarPath = join(support, session.appName, "StorableSidebar.json");
+  if (flags.has("--repair")) {
+    if (flags.has("--quit-arcmod")) {
+      if (isRunning(mod)) Bun.spawnSync(["osascript", "-e", `tell application id "${session.bundleId}" to quit`]);
+      await waitUntilClosed(mod, `Waiting for ${session.appName} to quit (confirm in ${session.appName} if it asks)…`);
+    }
+    if (isRunning(mod)) throw new Error(`quit ${session.appName} first`);
+    const crypto = betweenKeys(chromeSafeStoragePassword(), arcSafeStoragePassword());
+    for (const folder of importedProfileFolders(readJson(sidebarPath))) {
+      console.log(`• ${folder}`);
+      console.log(`  ${recryptProfile(join(support, session.appName, "User Data", folder), crypto)} values re-encrypted for ArcMod`);
+    }
+    return;
+  }
+  const all = chromeProfiles(readJson(join(CHROME_ROOT, "Local State")));
   const imported = (): ReadonlySet<string> => (existsSync(sidebarPath) ? spaceIDs(readJson(sidebarPath)) : new Set<string>());
   if (flags.has("--list")) {
     const existing = imported();
@@ -275,7 +350,6 @@ const main = async (args: readonly string[]): Promise<void> => {
     throw new Error(`launch ${session.appName} once before importing`);
   }
 
-  const mod = `(^|/)${session.appName}[.]app/Contents/MacOS/Arc( |$)`;
   if (flags.has("--quit-arcmod")) {
     if (isRunning(mod)) Bun.spawnSync(["osascript", "-e", `tell application id "${session.bundleId}" to quit`]);
     await waitUntilClosed(mod, `Waiting for ${session.appName} to quit (confirm in ${session.appName} if it asks)…`);
@@ -289,7 +363,7 @@ const main = async (args: readonly string[]): Promise<void> => {
     profiles: all.filter((profile) => requested.length === 0 || requested.includes(profile.directory)),
     modRoot,
     session,
-    chromePassword: () => keychainPassword("Chrome Safe Storage", "Chrome"),
+    crypto: () => betweenKeys(chromeSafeStoragePassword(), arcSafeStoragePassword()),
   });
 };
 
@@ -298,11 +372,11 @@ export interface ImportOptions {
   readonly profiles: readonly ChromeProfile[];
   readonly modRoot: string; // ~/Library/Application Support/<ArcMod's app name>
   readonly session: { readonly appName: string; readonly bundleId: string };
-  readonly chromePassword: () => string; // asked for only when there is something to import
+  readonly crypto: () => Recrypter; // Chrome's key to ArcMod's; asked for only when there is something to import
 }
 
 // Imports `profiles` from closed Chrome data into a closed ArcMod.
-export const importChromeProfiles = ({ chromeRoot, profiles, modRoot, session, chromePassword }: ImportOptions): void => {
+export const importChromeProfiles = ({ chromeRoot, profiles, modRoot, session, crypto: makeCrypto }: ImportOptions): void => {
   const userData = join(modRoot, "User Data");
   const sidebarPath = join(modRoot, "StorableSidebar.json");
   const localStatePath = join(userData, "Local State");
@@ -320,7 +394,7 @@ export const importChromeProfiles = ({ chromeRoot, profiles, modRoot, session, c
 
   const machineID = Bun.spawnSync(["defaults", "read", session.bundleId, "machineID"]).stdout.toString().trim();
   if (!machineID) throw new Error(`no machineID in ${session.bundleId}'s defaults; launch ${session.appName} once first`);
-  const crypto = recrypter(chromePassword(), MOCK_KEYCHAIN_PASSWORD);
+  const crypto = makeCrypto();
   const profileState = localState.profile as { info_cache: Record<string, Json>; profiles_order?: string[] };
   const template = profileState.info_cache.Default ?? {};
   const stamp = new Date().toISOString().replaceAll(/[:.]/g, "-");
@@ -333,7 +407,7 @@ export const importChromeProfiles = ({ chromeRoot, profiles, modRoot, session, c
     const directory = nextProfileDirectory((name) => name in profileState.info_cache || existsSync(join(userData, name)));
     console.log(`\n• ${profile.name} (${profile.directory}) → ${directory}`);
     const staging = join(userData, `${directory}.import-${stamp}`);
-    copyProfile(source, staging, crypto, skip);
+    copyProfile(source, staging, crypto);
     renameSync(staging, join(userData, directory));
 
     profileState.info_cache[directory] = {
@@ -366,10 +440,11 @@ if (import.meta.main) {
     console.error(`\nImport stopped: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
   } finally {
-    const validation = args.includes("--validation");
-    const session = sessionIdentity(validation);
+    // From the ArcMod menu: reopen ArcMod (the copy that ran the import, --app) whether or not the import worked.
+    const session = sessionIdentity();
     if (args.includes("--relaunch") && !isRunning(`(^|/)${session.appName}[.]app/Contents/MacOS/Arc( |$)`)) {
-      Bun.spawnSync([join(import.meta.dir, "run-mod.sh"), ...(validation ? ["--validation"] : [])], { stdout: "inherit", stderr: "inherit" });
+      const app = flagValue(args, "--app");
+      Bun.spawnSync([join(import.meta.dir, "run-mod.sh"), ...(app ? ["--app", app] : [])], { stdout: "inherit", stderr: "inherit" });
     }
   }
 }

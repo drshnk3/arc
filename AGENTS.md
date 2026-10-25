@@ -28,7 +28,13 @@
 ## Build and verification
 
 - Quit ArcMod before `bun tools/build-mod.ts`; the builder replaces its app bundle.
-- Launch with `tools/run-mod.sh`. Use **ArcMod** for routine testing.
+- The everyday ArcMod is the user's own browser, installed at `/Applications/ArcMod.app`; don't
+  rebuild or relaunch it without asking. Test with `--validation` builds (or agent builds on
+  `master`); `bun tools/build-mod.ts --debug` and `tools/run-mod.sh --debug` keep a build in
+  `build/` instead. The everyday ArcMod uses the Keychain's "Arc Safe Storage" item, like Arc.
+  Validation and agent builds run with `--use-mock-keychain` (Chromium's fixed, public test key;
+  ArcMod.dylib and `tools/run-mod.sh` add it), so never put real sessions in them: no imports, no
+  copies of a real profile, no signing in.
 - For code changes, run `bun run typecheck`, `bun run lint`, and `bun run test`.
   Ensure `bin/Arc.arm64` exists so binary tests do not silently skip; see README.
 - Native patches also need a rebuilt, signed app and relevant live behavior checks.
@@ -37,8 +43,9 @@
   browser data, credentials, app bundles or profiling captures. The 1.168.0
   decompile, dumps, executable and app bundle are tracked with Git LFS; the Ghidra
   project stays local.
-- When you find or fix a problem, update the status issue's list of known problems
-  (`gh issue edit 1 -R CryogenicPlanet/arc --body-file <file>`, keeping its layout and the
-  "Updated" date); don't keep separate status lists in docs. Record findings, evidence and
+- Track problems in the status issue (`gh issue edit 1 -R CryogenicPlanet/arc --body-file <file>`,
+  keeping its layout and the "Updated" date): add new ones; when you fix one, tick it and strike
+  it through with the fixing commits so it stays as history. Comment only for big updates, and
+  don't keep separate status lists in docs. Record findings, evidence and
   validation limits in `notes/`. Passing binary tests
   does not prove every shortcut works; separate source checks from live results.

@@ -9,7 +9,9 @@ ArcMod is a patched copy of Arc **1.168.0 (88413), arm64**, built next to the re
 ID, name and data folder. It runs without an Arc account, blocks The Browser Company's services, and adds
 tools for coding agents. `/Applications/Arc.app` and the original Arc profile are never modified.
 
-- `master` has every feature; `no-login` has only account-free use and service blocking.
+- One branch, `master`. The extras (sidebar marker, icon badge, One Little Arc, agent tools, update
+  checks) are switches in Settings → ArcMod; the old `no-login` branch is archived as the
+  `no-login-final` tag.
 - The engine (`ArcCore.framework`) is Arc's own by default. Our replacement built from Chromium source is
   [Arc Engine](https://github.com/CryogenicPlanet/arc-engine), included as the `engine/` submodule. For
   engine development, clone it next to this repo as `../arc-engine`; its tests expect that layout.
@@ -29,12 +31,13 @@ tools for coding agents. `/Applications/Arc.app` and the original Arc profile ar
 ## Build and run
 
 ```sh
-bun tools/build-mod.ts                 # build/ArcMod.app from /Applications/Arc.app (must be 1.168.0)
+bun tools/build-mod.ts                 # /Applications/ArcMod.app from Arc 1.168.0 (installed, or bin/'s copy)
+bun tools/build-mod.ts --debug         # build/ArcMod.app instead of installing
 bun tools/build-mod.ts --source <abs path to a 1.168.0 Arc.app>
 bun tools/build-mod.ts --agent <slug>  # an isolated agent build: own bundle, data and windows
 bun tools/build-mod.ts --validation    # a separate test copy, ArcModValidation
 bun tools/build-mod.ts --engine <ArcCore.framework>   # swap in another engine (ours)
-tools/run-mod.sh [--agent <slug> | --validation]      # always launch through this
+tools/run-mod.sh [--agent <slug> | --validation | --debug | --app <path>]  # launch from the repo (ArcMod also opens like any app)
 tools/run-mod.sh --guard               # sandbox that denies access to real Arc data (testing only)
 ```
 
@@ -56,7 +59,7 @@ is a pristine 1.168.0 app to pass as `--source` when the installed Arc has updat
   User Data included. `--user-data-dir` and `$HOME` are ignored by the Swift layer, so the builder's
   CFBundleName is what separates ArcMod's data.
 - The ad hoc re-signed copy has no iCloud entitlement, and Arc aborts at launch in CloudKit unless
-  `cloudKitSyncEnabled=false` is set in the mod's defaults domain. `run-mod.sh` writes it (and
+  `cloudKitSyncEnabled=false` is set in the mod's defaults domain. ArcMod.dylib writes it at load (and
   `firebaseSyncEnabled=false`) on every launch. Re-signing also loses Firebase sync, account login,
   passkeys and push, which are tied to Arc's Developer ID signature. Sparkle updates are disabled.
 - `codesign` appends a 16-byte load command without checking header room. If an inserted load command

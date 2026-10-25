@@ -19,10 +19,22 @@ is a required dylib load, so a missing module cannot silently produce a partiall
   their original validation and state checks.
 - The requested `ARC MOD` marker is anchored at the bottom of the native sidebar.
   The user accepted the current marker but wants future UI changes to match Arc's style.
-- New Little Arc requests reuse the existing Little Arc regardless of hostname or
-  entry point, retaining Arc's native navigation and focus behavior. A native profile
-  replacement closes the previous Little Arc through Arc's existing close/lifecycle
-  implementation; main browser windows are excluded.
+- One Little Arc (Settings → ArcMod, on by default): new Little Arc requests reuse the
+  existing Little Arc regardless of hostname or entry point, retaining Arc's native
+  navigation and focus behavior. A native profile replacement closes the previous Little Arc
+  through Arc's existing close/lifecycle implementation; main browser windows are excluded.
+  With the setting off, Arc's own same-site check runs and links open a Little Arc per site.
+  The decision at `0x102a7cb60` branches to a bridge at `0x104153e00`, in the zero padding at
+  the end of `__TEXT` (after `__eh_frame`, inside the file-backed, signed, executable segment).
+  The bridge calls `getenv("ARCMOD_LITTLE_ARC_PER_LINK")`, which the dylib sets on the main
+  thread at load and on toggle, then runs either ArcMod's replacement or Arc's original six
+  instructions. Clobbering caller-saved registers and flags there is safe: the site follows
+  `bl; cmp; b.ne`, so x0–x17 and the flags are already dead, and both continuations
+  (0x102a7cb78: `mov x0,#0; bl`; 0x102a7cbe0: reads only w8) redefine what they read; x30 was
+  saved in the prologue and sp is untouched. Validated live on the validation build: one reused
+  Little Arc by default, separate per-site windows with the setting off. The variable is
+  inherited by child processes (harmless), and a toggle could race a thread copying `environ`
+  (only at the moment of toggling).
 
 ## Native patches
 
@@ -59,14 +71,8 @@ the fresh validation profile; the normal mod's existing auth store had a null se
 Cross-profile replacement has static lifecycle review but has not been exercised with
 multiple validation profiles. Some SDKs remain bundled and retry requests that the
 native filter blocks; this is service isolation, not removal of every SDK binary.
-The native filter and local preferences are installed on every launch. Since 2026-10-25 a
-direct launch (Finder, Dock, Spotlight, links) also gets the launcher's Chromium switches,
-including the vendor resolver rules and the mock keychain: the dylib's constructor appends them
-to Swift's `CommandLine.arguments` (which Arc hands its engine) and to the C and `NSProcessInfo`
-copies. Arc drops the link it was opened with when those copies disagree. Re-executing with the
-switches instead breaks LaunchServices' process tracking (`NSRunningApplication` pid -1).
-Checked on the validation build: switches once in `chrome://version` for `open -a` and
-`tools/run-mod.sh` launches; a cold `open -a … <url>` still opens the link.
+Use the launcher for Chromium's additional vendor resolver rules. The native filter and
+local preferences are also installed on direct app launch.
 
 REA 6.4.0 inspected the original thin Mach-O; evidence is in
 `build/evidence/rea-macho.json`. Its static dispatch operation rejected the 76 MiB input

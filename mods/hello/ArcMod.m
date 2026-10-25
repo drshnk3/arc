@@ -4,9 +4,9 @@
 
 #import <AppKit/AppKit.h>
 #import <CoreServices/CoreServices.h>
-#import <crt_externs.h>
 #import <mach-o/dyld.h>
 #import <sys/xattr.h>
+#import <libproc.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "../local/ServicePolicy.h"
@@ -121,6 +121,8 @@ static void ArcModInstallHooks(void) {
 static NSString *const ArcModHideSidebarMarkerKey = @"ArcModHideSidebarMarker";
 static NSString *const ArcModHideIconBadgeKey = @"ArcModHideIconBadge";
 static NSString *const ArcModAppNameKey = @"ArcModAppName";
+static NSString *const ArcModLittleArcPerLinkKey = @"ArcModLittleArcPerLink";
+static NSString *const ArcModAgentToolsKey = @"ArcModAgentToolsEnabled";
 
 // Agent tools find an agent build's windows by its marker, so agent builds always show it.
 static BOOL ArcModSidebarMarkerShown(void) {
@@ -153,8 +155,9 @@ static void ArcModImportFromChrome(void);
 static NSString *gAvailableUpdate;
 static void ArcModRefreshAppIcon(BOOL rewriteBundle);
 
-// Only the normal ArcMod can be renamed; tools/build-mod.ts re-applies the name to that build alone.
-static BOOL ArcModCanRename(void) {
+// The everyday ArcMod (not a test or agent build): it alone can be renamed (tools/build-mod.ts re-applies the
+// name to that build) and holds the agent tools setting that tools/agent-session.ts reads.
+static BOOL ArcModIsEverydayBuild(void) {
 	return !ArcModAgentSession().length && ![NSBundle.mainBundle.bundleIdentifier hasSuffix:@".validation"];
 }
 
@@ -162,7 +165,7 @@ static BOOL ArcModCanRename(void) {
 // the unlocalized one, so renaming never moves ArcMod's data. tools/build-mod.ts writes the same files.
 // Returns NO if a file couldn't be written.
 static BOOL ArcModApplyAppName(void) {
-	if (!ArcModCanRename()) return YES;
+	if (!ArcModIsEverydayBuild()) return YES;
 	NSString *name = [NSUserDefaults.standardUserDefaults stringForKey:ArcModAppNameKey];
 	NSString *resources = NSBundle.mainBundle.resourcePath;
 	NSFileManager *files = NSFileManager.defaultManager;
@@ -193,6 +196,69 @@ static BOOL ArcModApplyAppName(void) {
 	return !failed;
 }
 
+// One Little Arc (the default): every link reuses the open Little Arc. Off: Arc's own behavior, which reuses one
+// only for the same site. The patched decision in Arc reads ARCMOD_LITTLE_ARC_PER_LINK (tools/little-arc-bridge.ts);
+// it's set and read on the main thread.
+static BOOL ArcModOneLittleArc(void) {
+	return ![NSUserDefaults.standardUserDefaults boolForKey:ArcModLittleArcPerLinkKey];
+}
+
+static void ArcModApplyLittleArcSetting(void) {
+	if (ArcModOneLittleArc()) unsetenv("ARCMOD_LITTLE_ARC_PER_LINK");
+	else setenv("ARCMOD_LITTLE_ARC_PER_LINK", "1", 1);
+}
+
+// Read by tools/agent-mcp.ts (through tools/agent-session.ts) before it opens an agent browser.
+static BOOL ArcModAgentToolsOn(void) {
+	id value = [NSUserDefaults.standardUserDefaults objectForKey:ArcModAgentToolsKey];
+	return !value || [value boolValue];
+}
+
+static void ArcModSetAgentToolsOn(BOOL on) {
+	[NSUserDefaults.standardUserDefaults setBool:on forKey:ArcModAgentToolsKey];
+}
+
+static void ArcModSetOneLittleArc(BOOL one) {
+	[NSUserDefaults.standardUserDefaults setBool:!one forKey:ArcModLittleArcPerLinkKey];
+	ArcModApplyLittleArcSetting();
+}
+
+// Setters shared by the ArcMod menu and Settings → ArcMod.
+static void ArcModSetSidebarMarkerShown(BOOL shown) {
+	[NSUserDefaults.standardUserDefaults setBool:!shown forKey:ArcModHideSidebarMarkerKey];
+	if (ArcModSidebarMarkerShown()) ArcModInstallWindowBadges();
+	else ArcModRemoveWindowBadges();
+}
+
+static void ArcModSetIconBadgeShown(BOOL shown) {
+	[NSUserDefaults.standardUserDefaults setBool:!shown forKey:ArcModHideIconBadgeKey];
+	ArcModRefreshAppIcon(YES);
+}
+
+static void ArcModSetAutomaticUpdateChecks(BOOL on) {
+	[NSUserDefaults.standardUserDefaults setBool:on forKey:ArcModAutomaticUpdateCheckKey];
+}
+
+static NSString *ArcModAppName(void) {
+	return [NSUserDefaults.standardUserDefaults stringForKey:ArcModAppNameKey] ?: @"ArcMod";
+}
+
+// Saves and applies a new shown name (empty or "ArcMod" resets it); alerts if it couldn't be written.
+static void ArcModRename(NSString *name) {
+	name = [name stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+	if (name.length > 40) name = [name substringWithRange:[name rangeOfComposedCharacterSequencesForRange:NSMakeRange(0, 40)]];
+	if (!name.length || [name isEqualToString:@"ArcMod"]) [NSUserDefaults.standardUserDefaults removeObjectForKey:ArcModAppNameKey];
+	else [NSUserDefaults.standardUserDefaults setObject:name forKey:ArcModAppNameKey];
+	if (ArcModApplyAppName()) return;
+	NSAlert *failure = [NSAlert new];
+	failure.messageText = @"Couldn't rename ArcMod";
+	failure.informativeText = [NSString stringWithFormat:@"ArcMod couldn't write its name into %@. Rebuild ArcMod to apply it.", NSBundle.mainBundle.bundlePath];
+	[failure runModal];
+}
+
+static void ArcModOpenSettingsPane(void);
+static void ArcModRefreshSettingsPane(void);
+
 #pragma mark - UI proof
 
 @interface ArcModMenuTarget : NSObject
@@ -207,15 +273,18 @@ static BOOL ArcModApplyAppName(void) {
 	[alert runModal];
 }
 
+- (void)showSettings:(id)sender {
+	ArcModOpenSettingsPane();
+}
+
 - (void)toggleSidebarMarker:(id)sender {
-	[NSUserDefaults.standardUserDefaults setBool:ArcModSidebarMarkerShown() forKey:ArcModHideSidebarMarkerKey];
-	if (ArcModSidebarMarkerShown()) ArcModInstallWindowBadges();
-	else ArcModRemoveWindowBadges();
+	ArcModSetSidebarMarkerShown(!ArcModSidebarMarkerShown());
+	ArcModRefreshSettingsPane();
 }
 
 - (void)toggleIconBadge:(id)sender {
-	[NSUserDefaults.standardUserDefaults setBool:ArcModIconBadgeShown() forKey:ArcModHideIconBadgeKey];
-	ArcModRefreshAppIcon(YES);
+	ArcModSetIconBadgeShown(!ArcModIconBadgeShown());
+	ArcModRefreshSettingsPane();
 }
 
 - (void)importFromArc:(id)sender {
@@ -232,7 +301,8 @@ static BOOL ArcModApplyAppName(void) {
 }
 
 - (void)toggleAutomaticUpdateChecks:(id)sender {
-	[NSUserDefaults.standardUserDefaults setBool:!ArcModAutomaticUpdateChecks() forKey:ArcModAutomaticUpdateCheckKey];
+	ArcModSetAutomaticUpdateChecks(!ArcModAutomaticUpdateChecks());
+	ArcModRefreshSettingsPane();
 }
 
 - (void)renameApp:(id)sender {
@@ -240,28 +310,19 @@ static BOOL ArcModApplyAppName(void) {
 	alert.messageText = @"Rename ArcMod";
 	alert.informativeText = @"The menu bar, Dock and Finder show the new name from the next launch. ArcMod's data stays where it is.";
 	NSTextField *field = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 24)];
-	field.stringValue = [NSUserDefaults.standardUserDefaults stringForKey:ArcModAppNameKey] ?: @"ArcMod";
+	field.stringValue = ArcModAppName();
 	field.placeholderString = @"ArcMod";
 	alert.accessoryView = field;
 	[alert addButtonWithTitle:@"Rename"];
 	[alert addButtonWithTitle:@"Cancel"];
 	alert.window.initialFirstResponder = field;
-	if ([alert runModal] != NSAlertFirstButtonReturn) return;
-	NSString *name = [field.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-	if (name.length > 40) name = [name substringWithRange:[name rangeOfComposedCharacterSequencesForRange:NSMakeRange(0, 40)]];
-	if (!name.length || [name isEqualToString:@"ArcMod"]) [NSUserDefaults.standardUserDefaults removeObjectForKey:ArcModAppNameKey];
-	else [NSUserDefaults.standardUserDefaults setObject:name forKey:ArcModAppNameKey];
-	if (!ArcModApplyAppName()) {
-		NSAlert *failure = [NSAlert new];
-		failure.messageText = @"Couldn't rename ArcMod";
-		failure.informativeText = [NSString stringWithFormat:@"ArcMod couldn't write its name into %@. Rebuild ArcMod to apply it.", NSBundle.mainBundle.bundlePath];
-		[failure runModal];
-	}
+	if ([alert runModal] == NSAlertFirstButtonReturn) ArcModRename(field.stringValue);
 }
 
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
-	if (item.action == @selector(renameApp:)) return ArcModCanRename();
-	if (item.action == @selector(importFromArc:) || item.action == @selector(importFromChrome:)) return !ArcModAgentSession().length;
+	if (item.action == @selector(renameApp:)) return ArcModIsEverydayBuild();
+	// Test and agent builds keep data under Chromium's fixed test key; real sessions only go into the everyday one.
+	if (item.action == @selector(importFromArc:) || item.action == @selector(importFromChrome:)) return ArcModIsEverydayBuild();
 	if (item.action == @selector(update:)) {
 		item.title = gAvailableUpdate ? [NSString stringWithFormat:@"Update to %@…", gAvailableUpdate] : @"Check for Updates…";
 		return ArcModChecksForUpdates();
@@ -381,7 +442,7 @@ static void ArcModEnsureLocalWindow(void) {
 static void ArcModConsolidateLittleWindows(NSWindow *preferred) {
 	// Agent bundles have their own sidebar and ordinary browser windows. Never
 	// apply the human's singleton Little Arc policy to an agent's navigation.
-	if (ArcModAgentSession().length) return;
+	if (ArcModAgentSession().length || !ArcModOneLittleArc()) return;
 	if (![NSStringFromClass(preferred.class) isEqualToString:@"Arc.LittleBrowserWindow"]) return;
 	// A profile change uses Arc's native close-old/create-new path. Keep its chosen
 	// profile and new window; synchronously retire any previous Little Arc so there
@@ -406,6 +467,9 @@ static void ArcModInstallMenu(void) {
 	gMenuTarget = [ArcModMenuTarget new];
 	NSMenuItem *root = [[NSMenuItem alloc] initWithTitle:@"ArcMod" action:nil keyEquivalent:@""];
 	NSMenu *sub = [[NSMenu alloc] initWithTitle:@"ArcMod"];
+	NSMenuItem *settings = [[NSMenuItem alloc] initWithTitle:@"ArcMod Settings…" action:@selector(showSettings:) keyEquivalent:@""];
+	settings.target = gMenuTarget;
+	[sub addItem:settings];
 	NSMenuItem *info = [[NSMenuItem alloc] initWithTitle:@"About this mod…" action:@selector(showInfo:) keyEquivalent:@""];
 	info.target = gMenuTarget;
 	[sub addItem:info];
@@ -661,6 +725,7 @@ static void ArcModCheckForUpdates(BOOL userInitiated) {
 			gAvailableUpdate = newer ? best : nil;
 			gAvailableUpdateURL = newer ? bestURL : nil;
 			ArcModLog(@"update check: %@", !ok ? error.localizedDescription ?: @"failed" : newer ? [NSString stringWithFormat:@"%@ available", best] : @"up to date");
+			ArcModRefreshSettingsPane();
 			if (!userInitiated) return;
 			if (!ok) ArcModAlert(@"Couldn't check for updates", error.localizedDescription ?: @"GitHub didn't return the release list.");
 			else if (newer) ArcModInstallUpdate();
@@ -684,15 +749,20 @@ static NSString *ArcModRepository(void) {
 
 // Runs `command` in the source checkout in a new Terminal window. ArcMod keeps running: the command does its
 // checks and work first, then asks ArcMod to quit when it needs to, and reopens it at the end.
-static void ArcModRunInTerminal(NSString *repository, NSString *command, NSString *name) {
+// Returns NO if Terminal didn't get the script. Usable before the app has started (no alerts).
+static BOOL ArcModOpenInTerminal(NSString *repository, NSString *command, NSString *name, NSError **error) {
 	NSString *script = [NSTemporaryDirectory() stringByAppendingPathComponent:[name stringByAppendingPathExtension:@"command"]];
 	NSString *body = [NSString stringWithFormat:@"#!/bin/zsh -l\ncd %@ || exit 1\n%@\n", ArcModShellQuoted(repository), command];
-	NSError *error;
-	BOOL written = [body writeToFile:script atomically:YES encoding:NSUTF8StringEncoding error:&error] &&
-		[NSFileManager.defaultManager setAttributes:@{NSFilePosixPermissions: @0700} ofItemAtPath:script error:&error];
+	BOOL written = [body writeToFile:script atomically:YES encoding:NSUTF8StringEncoding error:error] &&
+		[NSFileManager.defaultManager setAttributes:@{NSFilePosixPermissions: @0700} ofItemAtPath:script error:error];
 	// Arc's Info.plist turns on file quarantine, which would make Gatekeeper refuse a script ArcMod wrote.
 	if (written) removexattr(script.fileSystemRepresentation, "com.apple.quarantine", 0);
-	if (!written || ![NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:script]])
+	return written && [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:script]];
+}
+
+static void ArcModRunInTerminal(NSString *repository, NSString *command, NSString *name) {
+	NSError *error;
+	if (!ArcModOpenInTerminal(repository, command, name, &error))
 		ArcModAlert(@"Couldn't open Terminal", error.localizedDescription ?: @"Terminal didn't open the script.");
 }
 
@@ -711,30 +781,32 @@ static void ArcModInstallUpdate(void) {
 	NSModalResponse choice = [alert runModal];
 	if (choice == NSAlertSecondButtonReturn && gAvailableUpdateURL) [NSWorkspace.sharedWorkspace openURL:gAvailableUpdateURL];
 	if (choice != NSAlertFirstButtonReturn) return;
-	ArcModRunInTerminal(repository, @"bun tools/update.ts --quit-arcmod --relaunch", @"arcmod-update");
+	NSString *command = [NSString stringWithFormat:@"bun tools/update.ts --quit-arcmod --relaunch --app %@", ArcModShellQuoted(NSBundle.mainBundle.bundlePath)];
+	ArcModRunInTerminal(repository, command, @"arcmod-update");
 }
 
 // tools/import-arc-data.ts replaces ArcMod's profile, so ArcMod has to be closed while it runs, and so does Arc.
 static void ArcModImportFromArc(void) {
+	if (!ArcModIsEverydayBuild()) return;
 	NSString *repository = ArcModRepository();
 	if (!repository) return;
 	NSAlert *alert = [NSAlert new];
 	alert.messageText = @"Import your Arc data?";
 	alert.informativeText = @"Terminal copies cookies, site storage, extensions, history and permissions from Arc into ArcMod, so your "
 		@"sites stay signed in. Spaces and Arc account data aren't copied. Your current ArcMod profile is kept as a backup.\n\n"
-		@"Terminal asks ArcMod to quit, then waits for you to quit Arc. When macOS asks to read \"Arc Safe Storage\", choose Allow. "
-		@"ArcMod reopens when it's done.";
+		@"Terminal asks ArcMod to quit, then waits for you to quit Arc. ArcMod reopens when it's done.";
 	[alert addButtonWithTitle:@"Import"];
 	[alert addButtonWithTitle:@"Cancel"];
 	if ([alert runModal] != NSAlertFirstButtonReturn) return;
-	BOOL validation = [NSBundle.mainBundle.bundleIdentifier hasSuffix:@".validation"];
-	NSString *command = validation ? @"bun tools/import-arc-data.ts --validation --quit-arcmod --relaunch" : @"bun tools/import-arc-data.ts --quit-arcmod --relaunch";
+	NSString *command = [NSString stringWithFormat:@"bun tools/import-arc-data.ts --quit-arcmod --relaunch --app %@",
+		ArcModShellQuoted(NSBundle.mainBundle.bundlePath)];
 	ArcModRunInTerminal(repository, command, @"arcmod-import");
 }
 
 // tools/import-chrome-profiles.ts adds profiles and Spaces, so ArcMod and Chrome have to be closed while it runs. Its
 // --choose lists the Chrome profiles to pick from: macOS lets Terminal read Chrome's folder, not ArcMod.
 static void ArcModImportFromChrome(void) {
+	if (!ArcModIsEverydayBuild()) return;
 	NSString *repository = ArcModRepository();
 	if (!repository) return;
 	NSAlert *alert = [NSAlert new];
@@ -742,50 +814,520 @@ static void ArcModImportFromChrome(void) {
 	alert.informativeText = @"Terminal lists your Chrome profiles to choose from. Each one you pick becomes an ArcMod profile with a Space of the "
 		@"same name: Terminal copies its cookies, site storage, extensions, history and passwords, and pins its bookmarks in the "
 		@"Space as a Bookmarks folder.\n\n"
-		@"Then Terminal asks ArcMod to quit and waits for you to quit Chrome. When macOS asks to read \"Chrome Safe Storage\", "
-		@"choose Allow. If Terminal can't read Chrome's data, give it Full Disk Access. ArcMod reopens when it's done.";
+		@"Then Terminal asks ArcMod to quit and waits for you to quit Chrome. When macOS asks to read \"Chrome Safe Storage\" and "
+		@"\"Arc Safe Storage\", choose Allow. If Terminal can't read Chrome's data, give it Full Disk Access. ArcMod reopens when it's done.";
 	[alert addButtonWithTitle:@"Continue"];
 	[alert addButtonWithTitle:@"Cancel"];
 	if ([alert runModal] != NSAlertFirstButtonReturn) return;
-	BOOL validation = [NSBundle.mainBundle.bundleIdentifier hasSuffix:@".validation"];
-	NSString *command = validation ? @"bun tools/import-chrome-profiles.ts --choose --validation --quit-arcmod --relaunch"
-		: @"bun tools/import-chrome-profiles.ts --choose --quit-arcmod --relaunch";
+	NSString *command = [NSString stringWithFormat:@"bun tools/import-chrome-profiles.ts --choose --quit-arcmod --relaunch --app %@",
+		ArcModShellQuoted(NSBundle.mainBundle.bundlePath)];
 	ArcModRunInTerminal(repository, command, @"arcmod-import-chrome");
 }
 
-// mods/hello/LaunchSwitches.swift: appends the switches to Swift's CommandLine.arguments, which Arc hands its
-// engine, and returns them (NULL when tools/run-mod.sh already passed them).
-extern const char *const *ArcModAddLaunchSwitches(const char *hostResolverRules);
+#pragma mark - Settings → ArcMod
 
-// Arc also reads the C and Foundation copies of the arguments, and drops the link it was opened with when they
-// disagree with CommandLine.arguments, so all three get the same switches.
-static void ArcModEnsureLaunchSwitches(void) {
-	NSString *rules = [NSBundle.mainBundle objectForInfoDictionaryKey:@"ArcModHostResolverRules"];
-	if (![rules isKindOfClass:NSString.class] || !rules.length) return;
-	const char *const *added = ArcModAddLaunchSwitches(rules.UTF8String);
-	if (!added) return;
-	size_t count = 0;
-	while (added[count]) count++;
-	int argc = *_NSGetArgc();
-	char **argv = *_NSGetArgv();
-	char **next = calloc((size_t)argc + count + 1, sizeof(char *));
-	if (!next) return;
-	NSMutableArray<NSString *> *arguments = [NSProcessInfo.processInfo.arguments mutableCopy];
-	for (int i = 0; i < argc; i++) next[i] = argv[i];
-	for (size_t i = 0; i < count; i++) {
-		next[(size_t)argc + i] = (char *)added[i];
-		[arguments addObject:@(added[i])];
+// Arc's Settings window is the open-source Settings package (sindresorhus/Settings) built into Arc. ArcMod adds
+// a last toolbar item, "arcmod". Choosing it shows Arc's General pane through General's own toolbar action (so
+// the package's state stays consistent), hides General's view and lays ArcMod's pane over it at the same size.
+// Choosing any Arc pane, or Arc opening Settings on a specific pane, removes ArcMod's pane and shows General's
+// view again. Arc's toolbar item builder traps on an identifier it doesn't know, so "arcmod" never reaches it.
+static NSString *const ArcModSettingsItem = @"arcmod";
+static NSView *gSettingsPane;                    // ArcMod's pane while it's shown
+static NSMutableArray<NSView *> *gSettingsHidden; // Arc's views hidden under it
+
+static void ArcModHideSettingsPane(void) {
+	[gSettingsPane removeFromSuperview];
+	gSettingsPane = nil;
+	for (NSView *view in gSettingsHidden) view.hidden = NO; // always, even if the package detached them meanwhile
+	gSettingsHidden = nil;
+}
+
+@interface ArcModFlippedView : NSView
+@end
+@implementation ArcModFlippedView
+- (BOOL)isFlipped { return YES; }
+@end
+
+@interface ArcModSettingsTarget : NSObject
+@property (nonatomic, weak) NSTextField *nameField;
+- (void)showPane:(id)sender;
+@end
+
+static ArcModSettingsTarget *gSettingsTarget;
+
+static NSTextField *ArcModSettingsLabel(NSString *text, CGFloat size, NSFontWeight weight, NSColor *color) {
+	NSTextField *label = [NSTextField wrappingLabelWithString:text];
+	label.font = [NSFont systemFontOfSize:size weight:weight];
+	label.textColor = color;
+	label.selectable = NO;
+	return label;
+}
+
+// A row like Arc's own panes: a title (and an optional detail) on the left, its control on the right.
+static NSView *ArcModSettingsRow(NSString *title, NSString *detail, NSView *control) {
+	NSStackView *text = [NSStackView stackViewWithViews:@[ArcModSettingsLabel(title, 13, NSFontWeightRegular, NSColor.labelColor)]];
+	text.orientation = NSUserInterfaceLayoutOrientationVertical;
+	text.alignment = NSLayoutAttributeLeading;
+	text.spacing = 2;
+	if (detail) [text addArrangedSubview:ArcModSettingsLabel(detail, 11, NSFontWeightRegular, NSColor.secondaryLabelColor)];
+	NSStackView *row = [NSStackView stackViewWithViews:@[text, control]];
+	row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+	row.alignment = NSLayoutAttributeCenterY;
+	row.distribution = NSStackViewDistributionFill; // the text takes the free width, the control sits at the right edge
+	row.spacing = 16;
+	row.edgeInsets = NSEdgeInsetsMake(10, 14, 10, 14);
+	[text setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+	[text setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+	[control setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+	[control setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+	return row;
+}
+
+// Rows in a rounded group with separators, like Arc's grouped settings.
+static NSView *ArcModSettingsGroup(NSArray<NSView *> *rows) {
+	NSStackView *stack = [NSStackView new];
+	stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+	stack.spacing = 0;
+	for (NSView *row in rows) {
+		if (stack.arrangedSubviews.count) {
+			NSBox *line = [NSBox new];
+			line.boxType = NSBoxSeparator;
+			[stack addArrangedSubview:line];
+			[line.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-28].active = YES;
+		}
+		[stack addArrangedSubview:row];
+		[row.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
 	}
-	*_NSGetArgv() = next;
-	*_NSGetArgc() = argc + (int)count;
-	SEL setArguments = NSSelectorFromString(@"setArguments:");
-	if ([NSProcessInfo.processInfo respondsToSelector:setArguments])
-		((void (*)(id, SEL, id))objc_msgSend)(NSProcessInfo.processInfo, setArguments, arguments);
-	ArcModLog(@"added ArcMod's Chromium switches (opened without tools/run-mod.sh)");
+	NSBox *box = [NSBox new];
+	box.boxType = NSBoxCustom;
+	box.titlePosition = NSNoTitle;
+	box.cornerRadius = 8;
+	box.borderColor = NSColor.separatorColor;
+	box.fillColor = [NSColor colorWithName:nil dynamicProvider:^NSColor *(NSAppearance *appearance) {
+		BOOL dark = [appearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]] == NSAppearanceNameDarkAqua;
+		return dark ? [NSColor colorWithWhite:1 alpha:0.04] : [NSColor colorWithWhite:0 alpha:0.03];
+	}];
+	box.contentViewMargins = NSZeroSize;
+	box.contentView = stack;
+	return box;
+}
+
+static NSSwitch *ArcModSettingsSwitch(BOOL on, SEL action, BOOL enabled) {
+	NSSwitch *control = [NSSwitch new];
+	control.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+	control.target = gSettingsTarget;
+	control.action = action;
+	control.enabled = enabled;
+	return control;
+}
+
+static NSButton *ArcModSettingsButton(NSString *title, SEL action, BOOL enabled) {
+	NSButton *button = [NSButton buttonWithTitle:title target:gSettingsTarget action:action];
+	button.enabled = enabled;
+	return button;
+}
+
+static NSView *ArcModBuildSettingsPane(void) {
+	BOOL agent = ArcModAgentSession().length > 0;
+	NSTextField *name = [NSTextField textFieldWithString:ArcModAppName()];
+	name.placeholderString = @"ArcMod";
+	name.target = gSettingsTarget;
+	name.action = @selector(rename:);
+	name.enabled = ArcModIsEverydayBuild();
+	[name.widthAnchor constraintEqualToConstant:150].active = YES;
+	gSettingsTarget.nameField = name;
+	NSStackView *nameControl = [NSStackView stackViewWithViews:@[name, ArcModSettingsButton(@"Rename", @selector(rename:), ArcModIsEverydayBuild())]];
+	nameControl.spacing = 6;
+	NSString *version = [NSBundle.mainBundle objectForInfoDictionaryKey:@"ArcModVersion"];
+	NSString *updateTitle = gAvailableUpdate ? [NSString stringWithFormat:@"Update to %@…", gAvailableUpdate] : @"Check for Updates…";
+
+	NSStackView *content = [NSStackView stackViewWithViews:@[
+		ArcModSettingsLabel(@"Appearance", 13, NSFontWeightSemibold, NSColor.labelColor),
+		ArcModSettingsGroup(@[
+			ArcModSettingsRow(@"Show ARC MOD in the sidebar", nil, ArcModSettingsSwitch(ArcModSidebarMarkerShown(), @selector(setSidebarMarker:), !agent)),
+			ArcModSettingsRow(@"Show the MOD badge on the app icon", nil, ArcModSettingsSwitch(ArcModIconBadgeShown(), @selector(setIconBadge:), YES)),
+			ArcModSettingsRow(@"App name", @"Shown in the menu bar, Dock and Finder from the next launch. Your data stays where it is.", nameControl),
+		]),
+		ArcModSettingsLabel(@"Little Arc", 13, NSFontWeightSemibold, NSColor.labelColor),
+		ArcModSettingsGroup(@[
+			ArcModSettingsRow(@"One Little Arc", @"Links reuse the open Little Arc window. Off: Arc's behavior, a new Little Arc unless the link is for the same site. Turning it back on closes extra Little Arcs.",
+				ArcModSettingsSwitch(ArcModOneLittleArc(), @selector(setOneLittleArc:), !agent)),
+		]),
+		ArcModSettingsLabel(@"Agents", 13, NSFontWeightSemibold, NSColor.labelColor),
+		ArcModSettingsGroup(@[
+			ArcModSettingsRow(@"Agent browser tools", @"Lets coding agents open their own background ArcMod browsers through the local MCP server (tools/agent-mcp.ts). Your windows aren't affected either way.",
+				ArcModSettingsSwitch(ArcModAgentToolsOn(), @selector(setAgentTools:), ArcModIsEverydayBuild())),
+		]),
+		ArcModSettingsLabel(@"Your data", 13, NSFontWeightSemibold, NSColor.labelColor),
+		ArcModSettingsGroup(@[
+			ArcModSettingsRow(@"Import from Arc", @"Copies cookies, site storage, extensions, history and permissions from Arc, so your sites stay signed in. Terminal walks you through it.",
+				ArcModSettingsButton(@"Import…", @selector(importFromArc:), ArcModIsEverydayBuild())),
+			ArcModSettingsRow(@"Import from Chrome", @"Turns the Chrome profiles you pick into ArcMod profiles, each with its own Space, cookies, passwords and bookmarks. Terminal walks you through it.",
+				ArcModSettingsButton(@"Import…", @selector(importFromChrome:), ArcModIsEverydayBuild())),
+		]),
+		ArcModSettingsLabel(@"Updates", 13, NSFontWeightSemibold, NSColor.labelColor),
+		ArcModSettingsGroup(@[
+			ArcModSettingsRow(@"Check for updates automatically", @"Checks this repo's GitHub releases once a day.",
+				ArcModSettingsSwitch(ArcModAutomaticUpdateChecks(), @selector(setAutomaticUpdates:), ArcModChecksForUpdates())),
+			ArcModSettingsRow(@"Version", [version isKindOfClass:NSString.class] ? version : @"Unknown",
+				ArcModSettingsButton(updateTitle, @selector(update:), ArcModChecksForUpdates())),
+		]),
+	]];
+	content.orientation = NSUserInterfaceLayoutOrientationVertical;
+	content.alignment = NSLayoutAttributeLeading;
+	content.spacing = 8;
+	content.edgeInsets = NSEdgeInsetsMake(20, 30, 24, 30);
+	content.translatesAutoresizingMaskIntoConstraints = NO;
+	for (NSView *view in content.arrangedSubviews) {
+		if ([view isKindOfClass:NSBox.class]) {
+			[view.widthAnchor constraintEqualToAnchor:content.widthAnchor constant:-60].active = YES;
+			[content setCustomSpacing:20 afterView:view];
+		}
+	}
+
+	// A scroll view takes whatever size General's pane gives the window, without size constraints of its own.
+	ArcModFlippedView *document = [ArcModFlippedView new];
+	document.translatesAutoresizingMaskIntoConstraints = NO;
+	[document addSubview:content];
+	NSScrollView *scroll = [NSScrollView new];
+	scroll.drawsBackground = YES;
+	scroll.backgroundColor = NSColor.windowBackgroundColor;
+	scroll.hasVerticalScroller = YES;
+	scroll.autohidesScrollers = YES;
+	scroll.documentView = document;
+	[NSLayoutConstraint activateConstraints:@[
+		[content.topAnchor constraintEqualToAnchor:document.topAnchor],
+		[content.leadingAnchor constraintEqualToAnchor:document.leadingAnchor],
+		[content.trailingAnchor constraintEqualToAnchor:document.trailingAnchor],
+		[content.bottomAnchor constraintEqualToAnchor:document.bottomAnchor],
+		[document.topAnchor constraintEqualToAnchor:scroll.contentView.topAnchor],
+		[document.leadingAnchor constraintEqualToAnchor:scroll.contentView.leadingAnchor],
+		[document.widthAnchor constraintEqualToAnchor:scroll.contentView.widthAnchor],
+	]];
+	return scroll;
+}
+
+static void ArcModShowSettingsPaneIn(NSToolbar *toolbar) {
+	NSViewController *tabs = [toolbar.delegate isKindOfClass:NSViewController.class] ? (NSViewController *)toolbar.delegate : nil;
+	if (!tabs.view.window || !tabs.view.subviews.count) {
+		ArcModLog(@"settings: no Arc pane to show ArcMod's over");
+		return;
+	}
+	// Every Arc view goes under the pane (General, and an outgoing pane if a crossfade is still running).
+	gSettingsHidden = [NSMutableArray new];
+	for (NSView *view in tabs.view.subviews)
+		if (view != gSettingsPane && !view.hidden) {
+			view.hidden = YES;
+			[gSettingsHidden addObject:view];
+		}
+	NSView *pane = ArcModBuildSettingsPane();
+	pane.translatesAutoresizingMaskIntoConstraints = NO;
+	[tabs.view addSubview:pane];
+	[NSLayoutConstraint activateConstraints:@[
+		[pane.topAnchor constraintEqualToAnchor:tabs.view.topAnchor],
+		[pane.bottomAnchor constraintEqualToAnchor:tabs.view.bottomAnchor],
+		[pane.leadingAnchor constraintEqualToAnchor:tabs.view.leadingAnchor],
+		[pane.trailingAnchor constraintEqualToAnchor:tabs.view.trailingAnchor],
+	]];
+	gSettingsPane = pane;
+	toolbar.selectedItemIdentifier = ArcModSettingsItem;
+	tabs.view.window.title = @"ArcMod";
+}
+
+@implementation ArcModSettingsTarget
+- (void)showPane:(id)sender {
+	// From the toolbar, or from its overflow menu when the window is narrow (the sender is then a menu item).
+	NSToolbar *toolbar = [sender isKindOfClass:NSToolbarItem.class] ? ((NSToolbarItem *)sender).toolbar : NSApp.keyWindow.toolbar;
+	if (!toolbar) return;
+	if (gSettingsPane.window && gSettingsPane.window == ((NSViewController *)toolbar.delegate).view.window) {
+		// Already showing: rebuild it so it shows the current settings.
+		ArcModHideSettingsPane();
+		ArcModShowSettingsPaneIn(toolbar);
+		return;
+	}
+	ArcModHideSettingsPane();
+	// Arc's General pane through its own action, so the package's active tab, view and constraints stay its own.
+	for (NSToolbarItem *general in toolbar.items)
+		if ([general.itemIdentifier isEqualToString:@"general"]) [NSApp sendAction:general.action to:general.target from:general];
+	// The tab transition can finish on the next turn of the run loop.
+	dispatch_async(dispatch_get_main_queue(), ^{ ArcModShowSettingsPaneIn(toolbar); });
+}
+- (void)setSidebarMarker:(NSSwitch *)sender { ArcModSetSidebarMarkerShown(sender.state == NSControlStateValueOn); }
+- (void)setIconBadge:(NSSwitch *)sender { ArcModSetIconBadgeShown(sender.state == NSControlStateValueOn); }
+- (void)setOneLittleArc:(NSSwitch *)sender { ArcModSetOneLittleArc(sender.state == NSControlStateValueOn); }
+- (void)setAgentTools:(NSSwitch *)sender { ArcModSetAgentToolsOn(sender.state == NSControlStateValueOn); }
+- (void)setAutomaticUpdates:(NSSwitch *)sender { ArcModSetAutomaticUpdateChecks(sender.state == NSControlStateValueOn); }
+- (void)rename:(id)sender { if (self.nameField) ArcModRename(self.nameField.stringValue); }
+- (void)importFromArc:(id)sender { ArcModImportFromArc(); }
+- (void)importFromChrome:(id)sender { ArcModImportFromChrome(); }
+- (void)update:(id)sender {
+	if (gAvailableUpdate) ArcModInstallUpdate();
+	else ArcModCheckForUpdates(YES);
+}
+@end
+
+// After a setting changes elsewhere (the ArcMod menu, an update check), show its new state in the pane.
+static void ArcModRefreshSettingsPane(void) {
+	NSToolbar *toolbar = gSettingsPane.window.toolbar;
+	if (!toolbar) return;
+	ArcModHideSettingsPane();
+	ArcModShowSettingsPaneIn(toolbar);
+}
+
+typedef NSArray *(*ToolbarIdentifiersIMP)(id, SEL, NSToolbar *);
+static ToolbarIdentifiersIMP gOriginalAllowedIdentifiers, gOriginalDefaultIdentifiers, gOriginalSelectableIdentifiers;
+static NSArray *ArcModWithSettingsItem(NSArray *identifiers) {
+	return [identifiers containsObject:ArcModSettingsItem] ? identifiers : [identifiers arrayByAddingObject:ArcModSettingsItem];
+}
+static NSArray *ArcModAllowedIdentifiers(id self, SEL command, NSToolbar *toolbar) {
+	return ArcModWithSettingsItem(gOriginalAllowedIdentifiers(self, command, toolbar));
+}
+static NSArray *ArcModDefaultIdentifiers(id self, SEL command, NSToolbar *toolbar) {
+	return ArcModWithSettingsItem(gOriginalDefaultIdentifiers(self, command, toolbar));
+}
+static NSArray *ArcModSelectableIdentifiers(id self, SEL command, NSToolbar *toolbar) {
+	return ArcModWithSettingsItem(gOriginalSelectableIdentifiers(self, command, toolbar));
+}
+
+typedef NSToolbarItem *(*ToolbarItemIMP)(id, SEL, NSToolbar *, NSToolbarItemIdentifier, BOOL);
+static ToolbarItemIMP gOriginalToolbarItem;
+static NSToolbarItem *ArcModToolbarItem(id self, SEL command, NSToolbar *toolbar, NSToolbarItemIdentifier identifier, BOOL inserted) {
+	if (![identifier isEqualToString:ArcModSettingsItem]) return gOriginalToolbarItem(self, command, toolbar, identifier, inserted);
+	// A new item every time, like the package's own; same symbol recipe as Arc's General item.
+	NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:ArcModSettingsItem];
+	item.label = @"ArcMod";
+	item.paletteLabel = @"ArcMod";
+	item.toolTip = @"ArcMod's own settings";
+	NSImage *symbol = [NSImage imageWithSystemSymbolName:@"puzzlepiece.extension" accessibilityDescription:@"ArcMod"];
+	item.image = [symbol imageWithSymbolConfiguration:[NSImageSymbolConfiguration configurationWithPointSize:18 weight:NSFontWeightMedium]];
+	item.target = gSettingsTarget;
+	item.action = @selector(showPane:);
+	return item;
+}
+
+typedef void (*ItemSelectedIMP)(id, SEL, id);
+static ItemSelectedIMP gOriginalItemSelected;
+static void ArcModItemSelected(id self, SEL command, id item) {
+	ArcModHideSettingsPane();
+	gOriginalItemSelected(self, command, item);
+}
+
+typedef void (*ShowWindowIMP)(id, SEL, id);
+static ShowWindowIMP gOriginalSettingsShowWindow;
+static void ArcModSettingsShowWindow(id self, SEL command, id sender) {
+	NSWindow *window = [self isKindOfClass:NSWindowController.class] ? ((NSWindowController *)self).window : nil;
+	if (![window.toolbar.selectedItemIdentifier isEqualToString:ArcModSettingsItem]) ArcModHideSettingsPane();
+	gOriginalSettingsShowWindow(self, command, sender);
+}
+
+// Arc 1.168.0's implementations of the methods wrapped here (Ghidra addresses); anything else skips the pane.
+static BOOL ArcModMethodAt(Class owner, SEL selector, uint64_t address) {
+	Method method = owner ? class_getInstanceMethod(owner, selector) : NULL;
+	return method && (uint64_t)method_getImplementation(method) - (uint64_t)_dyld_get_image_vmaddr_slide(0) == address;
+}
+
+static void ArcModInstallSettingsPane(void) {
+	Class tabs = NSClassFromString(@"_TtC8Settings25SettingsTabViewController");
+	Class style = NSClassFromString(@"_TtC8Settings30ToolbarItemStyleViewController");
+	Class controller = NSClassFromString(@"_TtC8Settings24SettingsWindowController");
+	SEL itemFor = @selector(toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:);
+	SEL selected = NSSelectorFromString(@"toolbarItemSelected:");
+	if (!controller || !ArcModMethodAt(tabs, @selector(toolbarAllowedItemIdentifiers:), 0x101f428dc) ||
+		!ArcModMethodAt(tabs, @selector(toolbarDefaultItemIdentifiers:), 0x101f428d8) ||
+		!ArcModMethodAt(tabs, @selector(toolbarSelectableItemIdentifiers:), 0x101f42544) ||
+		!ArcModMethodAt(tabs, itemFor, 0x101f425bc) || !ArcModMethodAt(style, selected, 0x101f44440)) {
+		ArcModLog(@"settings: Arc's Settings window isn't the expected build; no ArcMod pane");
+		return;
+	}
+	gSettingsTarget = [ArcModSettingsTarget new];
+	gOriginalAllowedIdentifiers = (ToolbarIdentifiersIMP)ArcModReplaceMethod(tabs, @selector(toolbarAllowedItemIdentifiers:), (IMP)ArcModAllowedIdentifiers);
+	gOriginalDefaultIdentifiers = (ToolbarIdentifiersIMP)ArcModReplaceMethod(tabs, @selector(toolbarDefaultItemIdentifiers:), (IMP)ArcModDefaultIdentifiers);
+	gOriginalSelectableIdentifiers = (ToolbarIdentifiersIMP)ArcModReplaceMethod(tabs, @selector(toolbarSelectableItemIdentifiers:), (IMP)ArcModSelectableIdentifiers);
+	gOriginalToolbarItem = (ToolbarItemIMP)ArcModReplaceMethod(tabs, itemFor, (IMP)ArcModToolbarItem);
+	gOriginalItemSelected = (ItemSelectedIMP)ArcModReplaceMethod(style, selected, (IMP)ArcModItemSelected);
+	gOriginalSettingsShowWindow = (ShowWindowIMP)ArcModReplaceMethod(controller, @selector(showWindow:), (IMP)ArcModSettingsShowWindow);
+	ArcModLog(@"settings: ArcMod pane installed");
+}
+
+// ArcMod menu → ArcMod Settings…: open Settings, then pick the ArcMod item once the window is up.
+static void ArcModSelectSettingsPane(int attempts) {
+	for (NSWindow *window in NSApp.windows) {
+		if (!window.isVisible) continue;
+		for (NSToolbarItem *item in window.toolbar.items)
+			if ([item.itemIdentifier isEqualToString:ArcModSettingsItem]) {
+				[gSettingsTarget showPane:item];
+				return;
+			}
+	}
+	if (attempts > 0)
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 10), dispatch_get_main_queue(), ^{ ArcModSelectSettingsPane(attempts - 1); });
+}
+
+static void ArcModOpenSettingsPane(void) {
+	if (!gSettingsTarget) return;
+	[NSApp sendAction:NSSelectorFromString(@"showPreferences:") to:nil from:nil];
+	ArcModSelectSettingsPane(30);
+}
+
+// Chromium switches ArcMod needs from the first moment: Arc's hosts resolve to nowhere, and no sync or
+// background networking. The everyday ArcMod keeps cookies and passwords under Arc's own Keychain item
+// ("Arc Safe Storage"), like Arc, and never runs with --use-mock-keychain: that key is Chromium's fixed test
+// key, readable by anything that can read the data folder. Test and agent builds hold only disposable data
+// and use it, so they never ask for the Keychain.
+// Arc's app hands Chromium its arguments through ArcBrowserApplicationConfiguration (the same initializer in
+// Arc's engine and in Arc Engine), so they're added there; that lets ArcMod open like any app (Finder, Dock,
+// Spotlight). tools/run-mod.sh passes the same ones, and a switch that's already there isn't added twice.
+// The switch's name, with Chromium's one- or two-dash forms treated alike.
+static NSString *ArcModSwitchName(NSString *argument) {
+	NSString *name = [argument componentsSeparatedByString:@"="].firstObject;
+	while ([name hasPrefix:@"-"]) name = [name substringFromIndex:1];
+	return name;
+}
+
+// Inserted right after the program name (Chromium stops reading switches at a bare "--"). A host-resolver-rules
+// switch that's already there is merged with ArcMod's rules rather than replacing them.
+static NSArray<NSString *> *ArcModWithLaunchSwitches(NSArray<NSString *> *argv) {
+	NSString *rules = [NSBundle.mainBundle objectForInfoDictionaryKey:@"ArcModHostResolverRules"];
+	if (![rules isKindOfClass:NSString.class]) rules = @"";
+	NSMutableArray<NSString *> *result = [NSMutableArray new];
+	NSMutableSet<NSString *> *present = [NSMutableSet new];
+	const BOOL everyday = ArcModIsEverydayBuild();
+	BOOL switches = YES;
+	for (id argument in argv) {
+		if (![argument isKindOfClass:NSString.class]) continue;
+		if ([argument isEqualToString:@"--"]) switches = NO;
+		if (switches && result.count && [argument hasPrefix:@"-"]) {
+			NSString *name = ArcModSwitchName(argument);
+			if (everyday && [name isEqualToString:@"use-mock-keychain"]) continue;
+			[present addObject:name];
+			NSRange equals = [argument rangeOfString:@"="];
+			NSString *value = equals.location == NSNotFound ? @"" : [argument substringFromIndex:NSMaxRange(equals)];
+			if ([name isEqualToString:@"host-resolver-rules"] && rules.length && equals.location != NSNotFound && ![value hasPrefix:rules]) {
+				[result addObject:[NSString stringWithFormat:@"--host-resolver-rules=%@, %@", rules, value]];
+				continue;
+			}
+		}
+		[result addObject:argument];
+	}
+	if (!result.count) [result addObject:NSProcessInfo.processInfo.arguments.firstObject ?: @"Arc"];
+	NSMutableArray<NSString *> *wanted = [@[@"--no-default-browser-check", @"--disable-sync",
+		@"--disable-background-networking"] mutableCopy];
+	if (!everyday) [wanted insertObject:@"--use-mock-keychain" atIndex:0];
+	if (rules.length) [wanted addObject:[@"--host-resolver-rules=" stringByAppendingString:rules]];
+	NSUInteger insertAt = 1;
+	for (NSString *argument in wanted)
+		if (![present containsObject:ArcModSwitchName(argument)]) [result insertObject:argument atIndex:insertAt++];
+	return result;
+}
+
+// An init method: it consumes self and returns a retained object.
+typedef id (*ConfigurationInitIMP)(__attribute__((ns_consumed)) id, SEL, int, NSArray *, NSString *, NSUInteger, BOOL, NSUInteger,
+	BOOL, BOOL, NSString *) __attribute__((ns_returns_retained));
+static ConfigurationInitIMP gOriginalConfigurationInit;
+static id ArcModConfigurationInit(__attribute__((ns_consumed)) id self, SEL command, __unused int argc, NSArray *argv, NSString *profilePath,
+		NSUInteger applicationID, BOOL isProduction, NSUInteger restorationPolicy, BOOL loadAllProfiles, BOOL quitRunLoop,
+		NSString *suiteName) __attribute__((ns_returns_retained)) {
+	NSArray<NSString *> *extended = ArcModWithLaunchSwitches(argv);
+	if (![extended isEqualToArray:argv]) ArcModLog(@"launch switches: added %lu", (unsigned long)(extended.count - argv.count));
+	return gOriginalConfigurationInit(self, command, (int)extended.count, extended, profilePath, applicationID, isProduction,
+		restorationPolicy, loadAllProfiles, quitRunLoop, suiteName);
+}
+
+static void ArcModAddLaunchSwitches(void) {
+	Class configuration = NSClassFromString(@"ArcBrowserApplicationConfiguration");
+	SEL init = NSSelectorFromString(@"init:argv:profilePath:applicationID:isProduction:sessionRestorationPolicy:"
+		@"shouldLoadAllProfilesAtStartup:quitRunLoopOnTermination:userDefaultsSuiteName:");
+	Method method = configuration ? class_getInstanceMethod(configuration, init) : NULL;
+	if (method && strcmp(method_getTypeEncoding(method), "@72@0:8i16@20@28Q36B44Q48B56B60@64") == 0) {
+		gOriginalConfigurationInit = (ConfigurationInitIMP)method_setImplementation(method, (IMP)ArcModConfigurationInit);
+		return;
+	}
+	// Fail closed: without these switches Chromium would reach Arc's hosts, the everyday ArcMod could run on the
+	// test key, and a test build could ask for the Keychain. If the engine's initializer isn't the expected one,
+	// restart this process with them.
+	NSArray<NSString *> *arguments = NSProcessInfo.processInfo.arguments;
+	NSMutableSet<NSString *> *present = [NSMutableSet new];
+	for (NSString *argument in arguments) [present addObject:ArcModSwitchName(argument)];
+	NSMutableSet<NSString *> *required = [NSMutableSet setWithArray:@[@"no-default-browser-check", @"disable-sync",
+		@"disable-background-networking", @"host-resolver-rules"]];
+	const BOOL everyday = ArcModIsEverydayBuild();
+	if (!everyday) [required addObject:@"use-mock-keychain"];
+	if ([required isSubsetOfSet:present] && !(everyday && [present containsObject:@"use-mock-keychain"])) return;
+	NSArray<NSString *> *extended = ArcModWithLaunchSwitches(arguments);
+	if (getenv("ARCMOD_RELAUNCHED_WITH_SWITCHES")) {
+		fputs("ArcMod: couldn't add its launch switches; refusing to start without them\n", stderr);
+		exit(1);
+	}
+	ArcModLog(@"launch switches: engine initializer not found; restarting with the switches");
+	setenv("ARCMOD_RELAUNCHED_WITH_SWITCHES", "1", 1);
+	char **argv = calloc(extended.count + 1, sizeof(char *));
+	if (!argv) exit(1);
+	for (NSUInteger i = 0; i < extended.count; i++) argv[i] = strdup(extended[i].UTF8String);
+	execv(NSBundle.mainBundle.executablePath.fileSystemRepresentation, argv);
+	exit(1);
+}
+
+// One ArcMod per bundle ID: two copies (say an installed one and a --debug build) share one data folder, and
+// Finder, the Dock and Spotlight don't stop a second launch. Hand over to the running copy instead.
+static void ArcModEnsureSingleInstance(void) {
+	pid_t me = getpid();
+	for (NSRunningApplication *other in [NSRunningApplication runningApplicationsWithBundleIdentifier:NSBundle.mainBundle.bundleIdentifier]) {
+		if (other.processIdentifier == me) continue;
+		// A copy that's still quitting (Chromium can take a few seconds) gets time to finish first.
+		for (int i = 0; i < 50 && kill(other.processIdentifier, 0) == 0; i++) usleep(100000);
+		if (kill(other.processIdentifier, 0) != 0) continue;
+		ArcModLog(@"another copy is running (pid %d, %@); switching to it", other.processIdentifier, other.bundleURL.path);
+		[other activateWithOptions:NSApplicationActivateAllWindows];
+		exit(0);
+	}
+}
+
+// The everyday ArcMod keeps cookies and passwords under the Keychain's "Arc Safe Storage" key. A data folder from
+// before that is under Chromium's test key, and Chromium deletes saved passwords it can't decrypt, so Chromium
+// must not open it until tools/keychain-profile.ts has moved it over with ArcMod closed. The tool leaves a
+// marker in User Data; a new data folder starts on the Keychain and gets the marker right away. While the tool
+// runs (its lock names a live pid) or has a backup, the data folder isn't touched here.
+static void ArcModEnsureKeychainProfile(void) {
+	if (!ArcModIsEverydayBuild()) return;
+	NSFileManager *files = NSFileManager.defaultManager;
+	NSString *support = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject;
+	// The unlocalized name: Rename App only changes the localized one, and Arc names the data folder after this.
+	NSString *folder = [support stringByAppendingPathComponent:NSBundle.mainBundle.infoDictionary[@"CFBundleName"]];
+	NSString *userData = [folder stringByAppendingPathComponent:@"User Data"];
+	if ([files fileExistsAtPath:[userData stringByAppendingPathComponent:@".arcmod-keychain"]]) return;
+	NSString *lock = [NSString stringWithContentsOfFile:[folder stringByAppendingPathComponent:@"keychain-move.lock"] encoding:NSUTF8StringEncoding error:nil];
+	char holder[64] = {0};
+	if (lock.intValue > 0 && proc_name(lock.intValue, holder, sizeof holder) > 0 && strcmp(holder, "bun") == 0) exit(0);
+	BOOL leftovers = NO;
+	for (NSString *suffix in @[@".keychain-backup", @".keychain-backup.partial", @".keychain-aside"])
+		leftovers |= [files fileExistsAtPath:[userData stringByAppendingString:suffix]];
+	if (!leftovers && ![files fileExistsAtPath:userData] &&
+		[files createDirectoryAtPath:userData withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0700} error:nil] &&
+		[@"new data folder\n" writeToFile:[userData stringByAppendingPathComponent:@".arcmod-keychain"] atomically:YES
+			encoding:NSUTF8StringEncoding error:nil])
+		return;
+	ArcModLog(@"keychain: %@ is still under Chromium's test key; moving it to the Keychain in Terminal", userData);
+	NSString *repository = NSBundle.mainBundle.infoDictionary[@"ArcModRepository"];
+	NSString *command = [NSString stringWithFormat:@"bun tools/keychain-profile.ts --relaunch --app %@", ArcModShellQuoted(NSBundle.mainBundle.bundlePath)];
+	BOOL tool = [repository isKindOfClass:NSString.class] &&
+		[files fileExistsAtPath:[repository stringByAppendingPathComponent:@"tools/keychain-profile.ts"]];
+	if (!tool || !ArcModOpenInTerminal(repository, command, @"arcmod-keychain", NULL)) {
+		// No app yet: CFUserNotification shows an alert without NSApplication.
+		NSString *message = [NSString stringWithFormat:@"ArcMod's saved cookies and passwords still use Chromium's test key and need to move "
+			@"to the Keychain before ArcMod opens. In ArcMod's source folder, run:\n\nbun tools/keychain-profile.ts\n\n"
+			@"or, to delete them and sign in again:\n\nbun tools/keychain-profile.ts --discard"];
+		CFUserNotificationDisplayAlert(0, kCFUserNotificationStopAlertLevel, NULL, NULL, NULL, CFSTR("ArcMod can't open yet"),
+			(__bridge CFStringRef)message, NULL, NULL, NULL, NULL);
+	}
+	exit(0);
 }
 
 __attribute__((constructor)) static void ArcModInit(void) {
-	ArcModEnsureLaunchSwitches();
+	ArcModEnsureSingleInstance();
+	ArcModEnsureKeychainProfile();
+	ArcModApplyLittleArcSetting();
+	ArcModAddLaunchSwitches();
+	ArcModInstallSettingsPane();
 	ArcModInstallServicePolicy();
 	ArcModInstallAppIconHooks();
 	NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
@@ -824,7 +1366,9 @@ __attribute__((constructor)) static void ArcModInit(void) {
 		};
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC), dispatch_get_main_queue(), checkIfDue);
 		[NSTimer scheduledTimerWithTimeInterval:60 * 60 repeats:YES block:^(__unused NSTimer *timer) { checkIfDue(); }];
-		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ ArcModEnsureLocalWindow(); });
+		// With "restore windows" on, give Arc's own restore time first so a slow launch doesn't get an extra window.
+		int64_t fallback = [NSUserDefaults.standardUserDefaults boolForKey:@"arc_quitAlwaysKeepsWindows"] ? 3 : 1;
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, fallback * (int64_t)NSEC_PER_SEC), dispatch_get_main_queue(), ^{ ArcModEnsureLocalWindow(); });
 		// Arc rebuilds its main menu after launch; install once it has settled, and again later as a fallback.
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ ArcModInstallMenu(); ArcModInstallWindowBadges(); });
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ ArcModInstallMenu(); ArcModInstallWindowBadges(); });

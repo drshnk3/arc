@@ -1,31 +1,30 @@
 #!/usr/bin/env bun
 // Builds build/ArcMod.app: a local-mode APFS clone of Arc 1.168.0 (/Applications/Arc.app while it's still
 // 1.168.0, else the copy in bin/).
-//   - own bundle id (company.thebrowser.Browser.mod) and Sparkle auto-update disabled
+//   - own bundle id (dev.drshnk.arcmod for the everyday build) and Sparkle auto-update disabled
 //   - arm64 executable, required ArcMod.dylib, fingerprinted local UI/URL/single-Little-Arc patches
 //   - every nested binary re-signed ad hoc, inside-out, WITHOUT hardened runtime (so no library
 //     validation) and without Arc's restricted entitlements (iCloud, keychain groups, push)
-//   - or, for the normal ArcMod with ~/.arcmod/signing.json, signed with your certificate and provisioning
+//   - or, for the everyday ArcMod with ~/.arcmod/signing.json, signed with your certificate and provisioning
 //     profile and entitled to your team's keychain groups for passkeys (tools/signing.ts)
-//   - the normal ArcMod is installed as /Applications/ArcMod.app; test and agent builds stay in build/
 // /Applications/Arc.app is never modified.
 //
 //   bun tools/build-mod.ts [--source /Applications/Arc.app] [--validation | --agent <slug>]
 //                          [--engine <ArcCore.framework> | --engine release]   (Arc Engine; see README)
 
-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 import { hostResolverRules, servicePolicyHeader } from "./service-policy";
 import { shortcutPolicyHeader } from "./shortcut-policy";
 import { defaultArcSource } from "./arc-source";
 import { fetchEngine } from "./fetch-engine";
-import { finalApp, runningApp, stagedApp, swapInStagedApp } from "./build-paths";
-import { currentChannel, describeArgs } from "./update";
+import { finalApp, installedApp, runningAt, stagedApp, swapInStagedApp } from "./build-paths";
+import { describeArgs } from "./update";
 import { verifyShippedShortcutCoverage } from "./shortcut-coverage";
-import { parseBuildOptions, sessionIdentity } from "./agent-session";
-import { acquireLease } from "./agent-lease";
+import { EVERYDAY_BUNDLE_ID, LEGACY_EVERYDAY_BUNDLE_ID, parseBuildOptions } from "./agent-session";
 import { signingConfigPath, signingFor } from "./signing";
+import { acquireLease } from "./agent-lease";
 
 // All bundles share generated headers/dylib, so serialize complete builds.
 const buildLease = acquireLease("global", join(homedir(), ".arcmod", "build-locks"));
@@ -39,7 +38,9 @@ const ENGINE = options.engine === "release" ? await fetchEngine() : options.engi
 const SOURCE = Bun.argv.includes("--source") ? options.source : defaultArcSource();
 const { appName, bundleId: MOD_BUNDLE_ID } = session;
 // Built into a staging bundle and swapped in at the end, so a failed build leaves the previous app in place.
-const FINAL = finalApp(appName);
+// The everyday ArcMod is installed in Applications unless --debug; test and agent builds stay in build/.
+const INSTALL = session.agent === undefined && appName === "ArcMod" && !options.debug;
+const FINAL = INSTALL ? installedApp() : finalApp(appName);
 const OUT = stagedApp(appName);
 const DYLIB_INSTALL = "@executable_path/../Frameworks/ArcMod.dylib";
 
@@ -71,7 +72,7 @@ const depth = (p: string): number => p.split("/").length;
 
 // A staged build (--stage-only) can be made while the app runs; replacing the app can't.
 const assertOutputStopped = (): void => {
-  const running = runningApp(appName);
+  const running = runningAt(FINAL);
   if (running.length > 0) throw new Error(`refusing to overwrite running ${appName}: ${running.map((line) => line.trim()).join(", ")}`);
 };
 if (!options.stageOnly) assertOutputStopped();
@@ -81,10 +82,10 @@ const build = sh(["defaults", "read", join(SOURCE, "Contents/Info.plist"), "CFBu
 if (version !== "1.168.0" || build !== "88413") throw new Error(`unsupported Arc ${version} (${build}); local-mode patch targets 1.168.0 (88413)`);
 step(`source ${SOURCE} (Arc ${version})`);
 // Checked before anything is built, so a wrong certificate or profile fails fast.
-const signing = MOD_BUNDLE_ID === sessionIdentity().bundleId ? signingFor(MOD_BUNDLE_ID) : undefined;
+const signing = MOD_BUNDLE_ID === EVERYDAY_BUNDLE_ID ? signingFor(MOD_BUNDLE_ID) : undefined;
 step(signing
   ? `signing: ${signing.identity} with "${signing.profile.name}" (team ${signing.profile.team})`
-  : `signing: ad hoc${MOD_BUNDLE_ID === sessionIdentity().bundleId ? ` (no ${signingConfigPath()})` : ""}`);
+  : `signing: ad hoc${MOD_BUNDLE_ID === EVERYDAY_BUNDLE_ID ? ` (no ${signingConfigPath()})` : ""}`);
 step(`verify complete menu coverage (${verifyShippedShortcutCoverage(SOURCE).length} actions)`);
 step("verify native Foundation formatting ABI for compact state serialization");
 console.log(`  ${sh(["xcrun", "swift", "-O", join(root, "tools/verify-foundation-abi.swift")]).trim()}`);
@@ -93,20 +94,12 @@ writeFileSync(join(root, "build/ArcModServiceHosts.h"), servicePolicyHeader);
 writeFileSync(join(root, "build/ArcModShortcutPolicy.h"), shortcutPolicyHeader);
 
 const dylib = join(root, "build/ArcMod.dylib");
-const switches = join(root, "build/LaunchSwitches.o");
 step("compile mods/hello/ArcMod.m → build/ArcMod.dylib");
-sh([
-  "xcrun", "swiftc", "-c", "-parse-as-library", "-O", "-target", "arm64-apple-macos13.0", "-module-name", "ArcModLaunchSwitches",
-  "-o", switches, join(root, "mods/hello/LaunchSwitches.swift"),
-]);
-const sdk = sh(["xcrun", "--show-sdk-path"]).trim();
 sh([
   "clang", "-dynamiclib", "-arch", "arm64", "-fobjc-arc", "-Wall", "-Wextra", "-Werror", "-mmacosx-version-min=13.0",
   "-framework", "AppKit", "-framework", "CoreServices", "-framework", "Security", "-I", join(root, "build"), "-install_name", DYLIB_INSTALL, "-o", dylib,
-  // The Swift runtime ships with macOS 13.
-  "-L", join(sdk, "usr/lib/swift"), "-Wl,-rpath,/usr/lib/swift",
   join(root, "mods/hello/ArcMod.m"), join(root, "mods/local/ServicePolicy.m"),
-  join(root, "mods/local/ShortcutPolicy.m"), join(root, "mods/local/KeychainGroups.m"), switches,
+  join(root, "mods/local/ShortcutPolicy.m"), join(root, "mods/local/KeychainGroups.m"),
 ]);
 
 step(`APFS-clone app → ${relative(root, OUT)}`);
@@ -120,6 +113,12 @@ if (ENGINE !== undefined) {
   const installName = sh(["otool", "-D", engineBinary]).trim().split("\n").at(-1)?.trim();
   if (installName !== "@executable_path/../Frameworks/ArcCore.framework/Versions/A/ArcCore") {
     throw new Error(`engine install name is ${installName}, expected Arc's ArcCore path`);
+  }
+  // The everyday ArcMod keeps its keys in the Keychain item "Arc Safe Storage", like Arc's engine. An engine
+  // that uses Chromium's own item couldn't read that profile.
+  if (MOD_BUNDLE_ID === EVERYDAY_BUNDLE_ID && readFileSync(engineBinary).includes("Chromium Safe Storage")) {
+    throw new Error(`this engine keeps keys under "Chromium Safe Storage", so the everyday ArcMod couldn't read its profile; `
+      + "use Arc's engine or an Arc Engine build from eabe48ea on (`./package-engine.sh`)");
   }
   step(`engine → ${ENGINE}`);
   const frameworks = join(OUT, "Contents/Frameworks/ArcCore.framework");
@@ -150,22 +149,23 @@ plutil("-remove", "NSDockTilePlugIn");
 // the unlocalized CFBundleName, so renaming never moves the data. Only the normal ArcMod can be renamed.
 plutil("-insert", "LSHasLocalizedDisplayName", "-bool", "YES");
 // Read by tools/update.ts and ArcMod's update check: the release this build came from, its engine and its source.
-const describe = Bun.spawnSync(["git", "-C", root, "describe", "--tags", "--always", "--dirty", ...describeArgs(currentChannel())]).stdout.toString().trim();
+const describe = Bun.spawnSync(["git", "-C", root, "describe", "--tags", "--always", "--dirty", ...describeArgs]).stdout.toString().trim();
 plutil("-insert", "ArcModVersion", "-string", describe || "unknown");
 plutil("-insert", "ArcModBuildEngine", "-string", options.engine === "release" ? "release" : ENGINE ?? "arc");
 plutil("-insert", "ArcModRepository", "-string", root);
-// ArcMod used Arc's bundle ID with a ".mod" suffix before. Its settings (machineID, which Spaces use to name their
-// profile, the shown name and the ArcMod menu's switches) move to the new ID once.
-const LEGACY_BUNDLE_ID = "company.thebrowser.Browser.mod";
+// The everyday ArcMod uses the Keychain, not Chromium's test key (tools/keychain-profile.ts checks for this).
+if (MOD_BUNDLE_ID === EVERYDAY_BUNDLE_ID) plutil("-insert", "ArcModKeychain", "-bool", "YES");
+// The everyday ArcMod used Arc's bundle ID with a ".mod" suffix before. Its settings (machineID, which Spaces use to
+// name their profile, the shown name and ArcMod's switches) move to the new ID once.
 const hasSettings = (domain: string): boolean => Bun.spawnSync(["defaults", "read", domain, "machineID"]).success;
-if (MOD_BUNDLE_ID === sessionIdentity().bundleId && !hasSettings(MOD_BUNDLE_ID) && hasSettings(LEGACY_BUNDLE_ID)) {
-  step(`settings: ${LEGACY_BUNDLE_ID} → ${MOD_BUNDLE_ID}`);
+if (MOD_BUNDLE_ID === EVERYDAY_BUNDLE_ID && !hasSettings(MOD_BUNDLE_ID) && hasSettings(LEGACY_EVERYDAY_BUNDLE_ID)) {
+  step(`settings: ${LEGACY_EVERYDAY_BUNDLE_ID} → ${MOD_BUNDLE_ID}`);
   const exported = join(root, "build", "legacy-settings.plist");
-  sh(["defaults", "export", LEGACY_BUNDLE_ID, exported]);
+  sh(["defaults", "export", LEGACY_EVERYDAY_BUNDLE_ID, exported]);
   sh(["defaults", "import", MOD_BUNDLE_ID, exported]);
   rmSync(exported, { force: true });
 }
-const shownName = MOD_BUNDLE_ID === sessionIdentity().bundleId
+const shownName = session.agent === undefined && MOD_BUNDLE_ID === EVERYDAY_BUNDLE_ID
   ? Bun.spawnSync(["defaults", "read", MOD_BUNDLE_ID, "ArcModAppName"]).stdout.toString().trim()
   : "";
 if (shownName) {
@@ -237,6 +237,16 @@ if (options.stageOnly) {
   console.log(`\nstaged ${relative(root, OUT)} from Arc ${version}`);
 } else {
   assertOutputStopped();
-  swapInStagedApp(appName);
-  console.log(`\nbuilt ${FINAL} from Arc ${version}`);
+  swapInStagedApp(appName, FINAL);
+  if (INSTALL) {
+    // One everyday ArcMod: drop an older build/ArcMod.app so two copies don't share the bundle ID.
+    const lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+    if (existsSync(finalApp(appName)) && runningAt(finalApp(appName)).length === 0) {
+      Bun.spawnSync([lsregister, "-u", finalApp(appName)]);
+      rmSync(finalApp(appName), { recursive: true, force: true });
+      console.log(`  removed the old ${relative(root, finalApp(appName))}; re-pin ArcMod in the Dock if you had it there`);
+    }
+    Bun.spawnSync([lsregister, "-f", FINAL]);
+  }
+  console.log(`\nbuilt ${INSTALL ? FINAL : relative(root, FINAL)} from Arc ${version}`);
 }
