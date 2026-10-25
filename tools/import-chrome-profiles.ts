@@ -1,9 +1,11 @@
 // Imports Google Chrome profiles into ArcMod. Each Chrome profile becomes its own ArcMod profile (cookies, site
 // storage, extensions, history, passwords, bookmarks) with a Space of the same name, so its sites stay signed in.
 // Its bookmarks are pinned in that Space as a "Bookmarks" folder that mirrors Chrome's folders.
-//   bun tools/import-chrome-profiles.ts [--list] [--profile <Chrome profile folder>]... [--validation]
-//                                       [--quit-arcmod] [--relaunch]
-// Without --profile it imports every Chrome profile that isn't imported yet. --quit-arcmod and --relaunch work as
+//   bun tools/import-chrome-profiles.ts [--list [--json]] [--choose] [--profile <Chrome profile folder>]...
+//                                       [--validation] [--quit-arcmod] [--relaunch]
+// Without --profile it imports every Chrome profile that isn't imported yet; --choose first asks which of them, in a
+// macOS list dialog (what ArcMod → Import from Chrome… runs). Each new Space gets an Arc icon no other
+// Space uses. --quit-arcmod and --relaunch work as
 // in tools/import-arc-data.ts. Chrome has to be closed. Chrome is only read; ArcMod's sidebar and profile list
 // are backed up next to themselves before they change.
 // A Space names its profile by folder and machine: {"custom": {"_0": {"directoryBasename", "machineID"}}}, with
@@ -143,6 +145,22 @@ const writeAtomically = (path: string, value: unknown): void => {
   renameSync(`${path}.arcmod-tmp`, path);
 };
 
+// Arc's built-in Space icons (Arc 1.168.0), in the order imported Spaces get them; Arc's own first Space uses planet.
+export const SPACE_ICONS = [
+  "people", "terminal", "layers", "albums", "calendar", "shapes", "airplane", "musicalNote", "bonfire", "cloudOutline",
+  "construction", "restaurant", "barbell", "baseball", "colorPallete", "fileTrayFull", "chatBubbleEllipses",
+  "notifications", "receipt", "thumbsUp", "medical", "bandage", "triangle", "square", "ellipse", "checkbox", "search",
+  "planet",
+] as const;
+
+// The first icon no Space uses yet; once all are taken, they repeat.
+export const nextSpaceIcon = (used: readonly string[]): string =>
+  SPACE_ICONS.find((icon) => !used.includes(icon)) ?? SPACE_ICONS[used.length % SPACE_ICONS.length]!;
+
+const usedSpaceIcons = (main: Json): string[] => (main.spaces as unknown[])
+  .map((space) => ((space as { customInfo?: { iconType?: { icon?: unknown } } } | null)?.customInfo?.iconType?.icon))
+  .filter((icon): icon is string => typeof icon === "string");
+
 // Adds a Space bound to ArcMod profile `directory`, with `bookmarks` pinned, to Arc's StorableSidebar.json data.
 export const addSpace = (
   sidebar: Json, space: { readonly id: string; readonly title: string; readonly directory: string; readonly machineID: string },
@@ -165,7 +183,7 @@ export const addSpace = (
     id: space.id,
     title: space.title,
     profile: { custom: { _0: { directoryBasename: space.directory, machineID: space.machineID } } },
-    customInfo: { iconType: { icon: "planet" } },
+    customInfo: { iconType: { icon: nextSpaceIcon(usedSpaceIcons(main)) } },
     newContainerIDs: [{ unpinned: { _0: { shared: {} } } }, unpinnedID, { pinned: {} }, pinnedID],
     containerIDs: ["pinned", pinnedID, "unpinned", unpinnedID],
   });
@@ -186,22 +204,71 @@ const parseArgs = (args: readonly string[]): { readonly flags: ReadonlySet<strin
       const value = args[++index];
       if (!value || value.startsWith("--")) throw new Error("missing value for --profile");
       profiles.push(value);
-    } else if (["--list", "--validation", "--quit-arcmod", "--relaunch"].includes(arg)) flags.add(arg);
+    } else if (["--list", "--json", "--choose", "--validation", "--quit-arcmod", "--relaunch"].includes(arg)) flags.add(arg);
     else throw new Error(`unrecognized argument: ${arg}`);
   }
   return { flags, profiles };
 };
 
+// Shows macOS's list dialog with every label selected; returns the labels left selected (none when cancelled).
+export type ChooseFromList = (labels: readonly string[], prompt: string) => readonly string[];
+
+const chooseFromList: ChooseFromList = (labels, prompt) => {
+  const script = `function run(argv) {
+    const app = Application.currentApplication();
+    app.includeStandardAdditions = true;
+    app.activate();
+    const labels = JSON.parse(argv[0]);
+    return JSON.stringify(app.chooseFromList(labels, {
+      withTitle: "Import from Chrome", withPrompt: argv[1], defaultItems: labels,
+      multipleSelectionsAllowed: true, okButtonName: "Import", cancelButtonName: "Cancel",
+    }));
+  }`;
+  const result = Bun.spawnSync(["osascript", "-l", "JavaScript", "-e", script, JSON.stringify(labels), prompt], { stdout: "pipe", stderr: "pipe" });
+  const chosen: unknown = result.success ? JSON.parse(result.stdout.toString().trim() || "false") : false;
+  return Array.isArray(chosen) ? chosen.filter((label): label is string => typeof label === "string") : [];
+};
+
+// Asks which of the profiles not imported yet to import, all of them selected to begin with.
+export const chooseProfiles = (pending: readonly ChromeProfile[], imported: number, ask: ChooseFromList = chooseFromList): readonly ChromeProfile[] => {
+  const labels = pending.map((profile, index) =>
+    pending.findIndex((other) => other.name === profile.name) === index ? profile.name : `${profile.name} (${profile.directory})`);
+  const prompt = `Each profile you pick becomes an ArcMod profile with its own Space.${imported > 0 ? ` ${imported} imported before aren't listed.` : ""}`;
+  const chosen = new Set(ask(labels, prompt));
+  return pending.filter((_, index) => chosen.has(labels[index]!));
+};
+
 const main = async (args: readonly string[]): Promise<void> => {
-  const { flags, profiles: requested } = parseArgs(args);
+  const { flags, profiles: listed } = parseArgs(args);
+  let requested = listed;
   const session = sessionIdentity(flags.has("--validation"));
   const all = chromeProfiles(readJson(join(CHROME_ROOT, "Local State")));
+  const sidebarPath = join(support, session.appName, "StorableSidebar.json");
+  const imported = (): ReadonlySet<string> => (existsSync(sidebarPath) ? spaceIDs(readJson(sidebarPath)) : new Set<string>());
   if (flags.has("--list")) {
-    all.forEach((profile) => console.log(`${profile.directory}\t${profile.name}`));
+    const existing = imported();
+    const rows = all.map(({ directory, name }) => ({ directory, name, imported: existing.has(importedSpaceID(directory)) }));
+    if (flags.has("--json")) console.log(JSON.stringify(rows));
+    else rows.forEach((row) => console.log(`${row.directory}\t${row.name}${row.imported ? "\t(imported)" : ""}`));
     return;
   }
   const unknown = requested.filter((dir) => !all.some((profile) => profile.directory === dir));
   if (unknown.length > 0) throw new Error(`no Chrome profile folder ${unknown.join(", ")} (see --list)`);
+  // Before ArcMod is asked to quit, so cancelling leaves it open.
+  if (flags.has("--choose")) {
+    const existing = imported();
+    const pending = all.filter((profile) => (requested.length === 0 || requested.includes(profile.directory)) && !existing.has(importedSpaceID(profile.directory)));
+    if (pending.length === 0) {
+      console.log("Every Chrome profile is in ArcMod already; delete a Space in ArcMod to import its profile again.");
+      return;
+    }
+    requested = chooseProfiles(pending, all.length - pending.length).map((profile) => profile.directory);
+    if (requested.length === 0) {
+      console.log("No profiles chosen.");
+      return;
+    }
+    console.log(`chosen: ${requested.join(", ")}`);
+  }
 
   const modRoot = join(support, session.appName);
   if (!existsSync(join(modRoot, "StorableSidebar.json")) || !existsSync(join(modRoot, "User Data/Local State"))) {

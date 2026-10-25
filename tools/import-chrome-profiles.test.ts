@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { addSpace, bookmarkItems, bookmarkRoots, chromeProfiles, importedSpaceID, nextProfileDirectory } from "./import-chrome-profiles";
+import { addSpace, bookmarkItems, bookmarkRoots, chooseProfiles, chromeProfiles, importedSpaceID, nextProfileDirectory, nextSpaceIcon, SPACE_ICONS } from "./import-chrome-profiles";
 
 const ids = (): (() => string) => {
   let next = 0;
@@ -35,6 +35,23 @@ describe("Chrome profiles", () => {
     expect(chromeProfiles(localState).map((profile) => profile.name)).toEqual([
       "Darshan (one@example.com)", "Darshan (two@example.com)", "Darshan (Profile 4)", "Nanatsu",
     ]);
+  });
+
+  test("asks which profiles to import, all selected, and keeps the ones left selected", () => {
+    const pending = [
+      { directory: "Profile 6", name: "Fake", avatar: undefined },
+      { directory: "Profile 8", name: "vijay", avatar: undefined },
+      { directory: "Profile 9", name: "vijay", avatar: undefined },
+    ];
+    let asked: { labels: readonly string[]; prompt: string } | undefined;
+    const chosen = chooseProfiles(pending, 2, (labels, prompt) => {
+      asked = { labels, prompt };
+      return ["Fake", "vijay (Profile 9)"];
+    });
+    expect(asked?.labels).toEqual(["Fake", "vijay", "vijay (Profile 9)"]);
+    expect(asked?.prompt).toContain("2 imported before");
+    expect(chosen.map((profile) => profile.directory)).toEqual(["Profile 6", "Profile 9"]);
+    expect(chooseProfiles(pending, 0, () => [])).toEqual([]);
   });
 
   test("gives each Chrome profile a stable Space ID and a free ArcMod profile folder", () => {
@@ -111,5 +128,19 @@ describe("Spaces", () => {
     expect(items.get("id-1")).toMatchObject({ parentID: null, childrenIds: ["id-3"], data: { itemContainer: { containerType: { spaceItems: { _0: "arcmod.chrome-import.default" } } } } });
     expect(items.get("id-2")).toMatchObject({ childrenIds: [] });
     expect(items.get("id-3")).toMatchObject({ title: "Bookmarks", parentID: "id-1" });
+  });
+
+  test("gives each new Space an icon no other Space uses", () => {
+    const main = { spaces: ["default", { id: "default", customInfo: { iconType: { icon: "planet" } } }] as unknown[], items: [] as unknown[] };
+    const sidebar = { sidebar: { containers: [{ global: {} }, main] } };
+    const empty = (): ReturnType<typeof bookmarkItems> => ({ folderID: undefined, items: [], links: 0 });
+    for (const id of ["a", "b", "c"]) addSpace(sidebar, { id, title: id, directory: id, machineID: "machine" }, empty, 1, ids());
+    const icons = main.spaces.filter((space) => typeof space === "object").map((space) => (space as { customInfo: { iconType: { icon: string } } }).customInfo.iconType.icon);
+    expect(icons).toEqual(["planet", "people", "terminal", "layers"]);
+  });
+
+  test("picks unused icons first, then repeats them", () => {
+    expect(nextSpaceIcon(["people", "terminal"])).toBe("layers");
+    expect(nextSpaceIcon([...SPACE_ICONS])).toBe(SPACE_ICONS[0]);
   });
 });

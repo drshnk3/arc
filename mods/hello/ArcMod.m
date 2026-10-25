@@ -732,22 +732,24 @@ static void ArcModImportFromArc(void) {
 	ArcModRunInTerminal(repository, command, @"arcmod-import");
 }
 
-// tools/import-chrome-profiles.ts adds profiles and Spaces, so ArcMod and Chrome have to be closed while it runs.
+// tools/import-chrome-profiles.ts adds profiles and Spaces, so ArcMod and Chrome have to be closed while it runs. Its
+// --choose lists the Chrome profiles to pick from: macOS lets Terminal read Chrome's folder, not ArcMod.
 static void ArcModImportFromChrome(void) {
 	NSString *repository = ArcModRepository();
 	if (!repository) return;
 	NSAlert *alert = [NSAlert new];
-	alert.messageText = @"Import your Chrome profiles?";
-	alert.informativeText = @"Each Chrome profile becomes an ArcMod profile with a Space of the same name. Terminal copies its cookies, "
-		@"site storage, extensions, history and passwords, and pins its bookmarks in the Space as a Bookmarks folder. "
-		@"Profiles imported before are skipped.\n\n"
-		@"Terminal asks ArcMod to quit, then waits for you to quit Chrome. When macOS asks to read \"Chrome Safe Storage\", "
+	alert.messageText = @"Import Chrome profiles?";
+	alert.informativeText = @"Terminal lists your Chrome profiles to choose from. Each one you pick becomes an ArcMod profile with a Space of the "
+		@"same name: Terminal copies its cookies, site storage, extensions, history and passwords, and pins its bookmarks in the "
+		@"Space as a Bookmarks folder.\n\n"
+		@"Then Terminal asks ArcMod to quit and waits for you to quit Chrome. When macOS asks to read \"Chrome Safe Storage\", "
 		@"choose Allow. If Terminal can't read Chrome's data, give it Full Disk Access. ArcMod reopens when it's done.";
-	[alert addButtonWithTitle:@"Import"];
+	[alert addButtonWithTitle:@"Continue"];
 	[alert addButtonWithTitle:@"Cancel"];
 	if ([alert runModal] != NSAlertFirstButtonReturn) return;
 	BOOL validation = [NSBundle.mainBundle.bundleIdentifier hasSuffix:@".validation"];
-	NSString *command = validation ? @"bun tools/import-chrome-profiles.ts --validation --quit-arcmod --relaunch" : @"bun tools/import-chrome-profiles.ts --quit-arcmod --relaunch";
+	NSString *command = validation ? @"bun tools/import-chrome-profiles.ts --choose --validation --quit-arcmod --relaunch"
+		: @"bun tools/import-chrome-profiles.ts --choose --quit-arcmod --relaunch";
 	ArcModRunInTerminal(repository, command, @"arcmod-import-chrome");
 }
 
