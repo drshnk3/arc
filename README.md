@@ -161,12 +161,17 @@ bun tools/import-chrome-profiles.ts --profile "Profile 2"   # or only some
 bun tools/import-chrome-profiles.ts --choose                # or pick them in a list
 ```
 
-- macOS asks to read "Chrome Safe Storage". Choose **Allow**, not "Always Allow".
+- Chrome's cookies and passwords are re-encrypted from its Keychain item to ArcMod's ("Arc Safe
+  Storage"), so macOS asks to read both. Choose **Allow**, not "Always Allow".
 - If Terminal can't read Chrome's folder, give it Full Disk Access in **System Settings →
   Privacy & Security**.
 - Chrome is only read. Profiles imported before are skipped; delete the Space in ArcMod to import
   one again. ArcMod's sidebar and profile list are backed up as
   `*.pre-chrome-import-<timestamp>`.
+- Only the everyday ArcMod imports; test builds keep their data under Chromium's test key.
+- Profiles imported before 2026-10-25 kept Chrome's cookies (`Network/Cookies`) under Chrome's key,
+  so their sites were signed out. With ArcMod closed, `bun tools/import-chrome-profiles.ts --repair`
+  re-encrypts what's left.
 
 ## Agent browser tools
 
