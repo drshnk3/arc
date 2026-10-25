@@ -21,6 +21,22 @@ describe("Chrome profiles", () => {
     ]);
   });
 
+  test("tells profiles with the same name apart by account, or by folder without one", () => {
+    const localState = {
+      profile: {
+        info_cache: {
+          "Profile 1": { name: "Darshan", user_name: "one@example.com" },
+          "Profile 2": { name: "Darshan", user_name: "two@example.com" },
+          "Profile 4": { name: "Darshan" },
+          "Profile 3": { name: "Nanatsu", user_name: "n@example.com" },
+        },
+      },
+    };
+    expect(chromeProfiles(localState).map((profile) => profile.name)).toEqual([
+      "Darshan (one@example.com)", "Darshan (two@example.com)", "Darshan (Profile 4)", "Nanatsu",
+    ]);
+  });
+
   test("gives each Chrome profile a stable Space ID and a free ArcMod profile folder", () => {
     expect(importedSpaceID("Profile 1")).toBe("arcmod.chrome-import.profile-1");
     expect(importedSpaceID("Default")).toBe("arcmod.chrome-import.default");

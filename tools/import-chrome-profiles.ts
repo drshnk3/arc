@@ -57,19 +57,28 @@ const readJson = (path: string): Json => {
   }
 };
 
-// Chrome's profiles in its own order, from its Local State.
+// Chrome's profiles in its own order, from its Local State. Profiles that share a name are told apart by their
+// account, as Chrome's own profile menu does ("Darshan (name@example.com)").
 export const chromeProfiles = (localState: Json): readonly ChromeProfile[] => {
-  const profile = (localState.profile ?? {}) as { info_cache?: Record<string, { name?: unknown; avatar_icon?: unknown }>; profiles_order?: unknown };
+  type Entry = { name?: unknown; avatar_icon?: unknown; user_name?: unknown };
+  const profile = (localState.profile ?? {}) as { info_cache?: Record<string, Entry>; profiles_order?: unknown };
   const cache = profile.info_cache ?? {};
   const order = Array.isArray(profile.profiles_order) ? profile.profiles_order.filter((dir): dir is string => typeof dir === "string") : [];
-  return [...new Set([...order, ...Object.keys(cache)])].filter((dir) => cache[dir] !== undefined).map((directory) => {
+  const profiles = [...new Set([...order, ...Object.keys(cache)])].filter((dir) => cache[dir] !== undefined).map((directory) => {
     const entry = cache[directory]!;
     return {
       directory,
       name: typeof entry.name === "string" && entry.name.trim() ? entry.name.trim() : directory,
+      account: typeof entry.user_name === "string" && entry.user_name.trim() ? entry.user_name.trim() : undefined,
       avatar: typeof entry.avatar_icon === "string" ? entry.avatar_icon : undefined,
     };
   });
+  const shared = (name: string): boolean => profiles.filter((other) => other.name === name).length > 1;
+  return profiles.map(({ directory, name, account, avatar }) => ({
+    directory,
+    name: shared(name) ? `${name} (${account ?? directory})` : name,
+    avatar,
+  }));
 };
 
 export const importedSpaceID = (chromeDirectory: string): string =>
