@@ -4,6 +4,7 @@
 
 #import <AppKit/AppKit.h>
 #import <CoreServices/CoreServices.h>
+#import <crt_externs.h>
 #import <mach-o/dyld.h>
 #import <sys/xattr.h>
 #import <objc/runtime.h>
@@ -148,12 +149,13 @@ static void ArcModRemoveWindowBadges(void);
 static void ArcModCheckForUpdates(BOOL userInitiated);
 static void ArcModInstallUpdate(void);
 static void ArcModImportFromArc(void);
+static void ArcModImportFromChrome(void);
 static NSString *gAvailableUpdate;
 static void ArcModRefreshAppIcon(BOOL rewriteBundle);
 
 // Only the normal ArcMod can be renamed; tools/build-mod.ts re-applies the name to that build alone.
 static BOOL ArcModCanRename(void) {
-	return [NSBundle.mainBundle.bundleIdentifier isEqualToString:@"company.thebrowser.Browser.mod"];
+	return !ArcModAgentSession().length && ![NSBundle.mainBundle.bundleIdentifier hasSuffix:@".validation"];
 }
 
 // The name the menu bar, Dock and Finder show is the localized CFBundleName. Arc names its data folder after
@@ -220,6 +222,10 @@ static BOOL ArcModApplyAppName(void) {
 	ArcModImportFromArc();
 }
 
+- (void)importFromChrome:(id)sender {
+	ArcModImportFromChrome();
+}
+
 - (void)update:(id)sender {
 	if (gAvailableUpdate) ArcModInstallUpdate();
 	else ArcModCheckForUpdates(YES);
@@ -255,7 +261,7 @@ static BOOL ArcModApplyAppName(void) {
 
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
 	if (item.action == @selector(renameApp:)) return ArcModCanRename();
-	if (item.action == @selector(importFromArc:)) return !ArcModAgentSession().length;
+	if (item.action == @selector(importFromArc:) || item.action == @selector(importFromChrome:)) return !ArcModAgentSession().length;
 	if (item.action == @selector(update:)) {
 		item.title = gAvailableUpdate ? [NSString stringWithFormat:@"Update to %@…", gAvailableUpdate] : @"Check for Updates…";
 		return ArcModChecksForUpdates();
@@ -406,6 +412,9 @@ static void ArcModInstallMenu(void) {
 	NSMenuItem *import = [[NSMenuItem alloc] initWithTitle:@"Import from Arc…" action:@selector(importFromArc:) keyEquivalent:@""];
 	import.target = gMenuTarget;
 	[sub addItem:import];
+	NSMenuItem *chrome = [[NSMenuItem alloc] initWithTitle:@"Import from Chrome…" action:@selector(importFromChrome:) keyEquivalent:@""];
+	chrome.target = gMenuTarget;
+	[sub addItem:chrome];
 	[sub addItem:NSMenuItem.separatorItem];
 	NSMenuItem *marker = [[NSMenuItem alloc] initWithTitle:@"Show ARC MOD in Sidebar" action:@selector(toggleSidebarMarker:) keyEquivalent:@""];
 	marker.target = gMenuTarget;
@@ -723,7 +732,58 @@ static void ArcModImportFromArc(void) {
 	ArcModRunInTerminal(repository, command, @"arcmod-import");
 }
 
+// tools/import-chrome-profiles.ts adds profiles and Spaces, so ArcMod and Chrome have to be closed while it runs.
+static void ArcModImportFromChrome(void) {
+	NSString *repository = ArcModRepository();
+	if (!repository) return;
+	NSAlert *alert = [NSAlert new];
+	alert.messageText = @"Import your Chrome profiles?";
+	alert.informativeText = @"Each Chrome profile becomes an ArcMod profile with a Space of the same name. Terminal copies its cookies, "
+		@"site storage, extensions, history and passwords, and pins its bookmarks in the Space as a Bookmarks folder. "
+		@"Profiles imported before are skipped.\n\n"
+		@"Terminal asks ArcMod to quit, then waits for you to quit Chrome. When macOS asks to read \"Chrome Safe Storage\", "
+		@"choose Allow. If Terminal can't read Chrome's data, give it Full Disk Access. ArcMod reopens when it's done.";
+	[alert addButtonWithTitle:@"Import"];
+	[alert addButtonWithTitle:@"Cancel"];
+	if ([alert runModal] != NSAlertFirstButtonReturn) return;
+	BOOL validation = [NSBundle.mainBundle.bundleIdentifier hasSuffix:@".validation"];
+	NSString *command = validation ? @"bun tools/import-chrome-profiles.ts --validation --quit-arcmod --relaunch" : @"bun tools/import-chrome-profiles.ts --quit-arcmod --relaunch";
+	ArcModRunInTerminal(repository, command, @"arcmod-import-chrome");
+}
+
+// mods/hello/LaunchSwitches.swift: appends the switches to Swift's CommandLine.arguments, which Arc hands its
+// engine, and returns them (NULL when tools/run-mod.sh already passed them).
+extern const char *const *ArcModAddLaunchSwitches(const char *hostResolverRules);
+
+// Arc also reads the C and Foundation copies of the arguments, and drops the link it was opened with when they
+// disagree with CommandLine.arguments, so all three get the same switches.
+static void ArcModEnsureLaunchSwitches(void) {
+	NSString *rules = [NSBundle.mainBundle objectForInfoDictionaryKey:@"ArcModHostResolverRules"];
+	if (![rules isKindOfClass:NSString.class] || !rules.length) return;
+	const char *const *added = ArcModAddLaunchSwitches(rules.UTF8String);
+	if (!added) return;
+	size_t count = 0;
+	while (added[count]) count++;
+	int argc = *_NSGetArgc();
+	char **argv = *_NSGetArgv();
+	char **next = calloc((size_t)argc + count + 1, sizeof(char *));
+	if (!next) return;
+	NSMutableArray<NSString *> *arguments = [NSProcessInfo.processInfo.arguments mutableCopy];
+	for (int i = 0; i < argc; i++) next[i] = argv[i];
+	for (size_t i = 0; i < count; i++) {
+		next[(size_t)argc + i] = (char *)added[i];
+		[arguments addObject:@(added[i])];
+	}
+	*_NSGetArgv() = next;
+	*_NSGetArgc() = argc + (int)count;
+	SEL setArguments = NSSelectorFromString(@"setArguments:");
+	if ([NSProcessInfo.processInfo respondsToSelector:setArguments])
+		((void (*)(id, SEL, id))objc_msgSend)(NSProcessInfo.processInfo, setArguments, arguments);
+	ArcModLog(@"added ArcMod's Chromium switches (opened without tools/run-mod.sh)");
+}
+
 __attribute__((constructor)) static void ArcModInit(void) {
+	ArcModEnsureLaunchSwitches();
 	ArcModInstallServicePolicy();
 	ArcModInstallAppIconHooks();
 	NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;

@@ -59,8 +59,14 @@ the fresh validation profile; the normal mod's existing auth store had a null se
 Cross-profile replacement has static lifecycle review but has not been exercised with
 multiple validation profiles. Some SDKs remain bundled and retry requests that the
 native filter blocks; this is service isolation, not removal of every SDK binary.
-Use the launcher for Chromium's additional vendor resolver rules. The native filter and
-local preferences are also installed on direct app launch.
+The native filter and local preferences are installed on every launch. Since 2026-10-25 a
+direct launch (Finder, Dock, Spotlight, links) also gets the launcher's Chromium switches,
+including the vendor resolver rules and the mock keychain: the dylib's constructor appends them
+to Swift's `CommandLine.arguments` (which Arc hands its engine) and to the C and `NSProcessInfo`
+copies. Arc drops the link it was opened with when those copies disagree. Re-executing with the
+switches instead breaks LaunchServices' process tracking (`NSRunningApplication` pid -1).
+Checked on the validation build: switches once in `chrome://version` for `open -a` and
+`tools/run-mod.sh` launches; a cold `open -a … <url>` still opens the link.
 
 REA 6.4.0 inspected the original thin Mach-O; evidence is in
 `build/evidence/rea-macho.json`. Its static dispatch operation rejected the 76 MiB input

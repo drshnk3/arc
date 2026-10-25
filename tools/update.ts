@@ -9,11 +9,11 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { finalApp, runningApp, stagedApp, swapInStagedApp } from "./build-paths";
+import { sessionIdentity } from "./agent-session";
 
 const root = join(import.meta.dir, "..");
 const RELEASES = "https://api.github.com/repos/CryogenicPlanet/arc/releases?per_page=50";
-const APP = "ArcMod";
-const BUNDLE_ID = "company.thebrowser.Browser.mod";
+const { appName: APP, bundleId: BUNDLE_ID } = sessionIdentity();
 
 export type Channel = "master" | "no-login";
 type Version = readonly [number, number, number];

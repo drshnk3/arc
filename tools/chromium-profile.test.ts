@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createCipheriv, pbkdf2Sync } from "node:crypto";
-import { recrypter } from "./import-arc-data";
+import { recrypter } from "./chromium-profile";
 
 const encrypt = (password: string, plain: string): Buffer => {
   const cipher = createCipheriv("aes-128-cbc", pbkdf2Sync(password, "saltysalt", 1003, 16, "sha1"), Buffer.alloc(16, 0x20));

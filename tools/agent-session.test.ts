@@ -7,7 +7,7 @@ import { parseBuildOptions, sessionIdentity, validateAgentSlug } from "./agent-s
 describe("agent build identity", () => {
   test("normal and validation keep existing identities", () => {
     expect(sessionIdentity().appName).toBe("ArcMod");
-    expect(sessionIdentity().bundleId).toBe("company.thebrowser.Browser.mod");
+    expect(sessionIdentity().bundleId).toBe("dev.drshnk.arcmod");
     expect(sessionIdentity(true).appName).toBe("ArcModValidation");
     expect(sessionIdentity(true).bundleId).toBe("company.thebrowser.Browser.mod.validation");
   });
@@ -49,7 +49,7 @@ const launch = (args: readonly string[], options: { readonly running?: string; r
     mkdirSync(join(root, "stubs"));
     copyFileSync(join(import.meta.dir, "run-mod.sh"), join(root, "tools/run-mod.sh"));
     for (const [name, agent] of [["ArcMod", ""], ["ArcModValidation", ""], ["ArcModAgent-scout", options.plistAgent ?? "scout"]]) {
-      const contents = join(root, `build/${name}.app/Contents`);
+      const contents = join(root, `${name === "ArcMod" ? "Applications" : "build"}/${name}.app/Contents`);
       mkdirSync(join(contents, "MacOS"), { recursive: true });
       writeFileSync(join(contents, "MacOS/Arc"), "#!/bin/sh\nexit 99\n");
       chmodSync(join(contents, "MacOS/Arc"), 0o755);
@@ -60,7 +60,7 @@ const launch = (args: readonly string[], options: { readonly running?: string; r
       writeFileSync(path, `#!/bin/bash\nprintf '%s\\0' "$@" >> "$ARC_TEST_TRACE/${command}"\n${command === "pgrep" ? 'if [[ -n "$ARC_TEST_RUNNING" ]]; then echo "$ARC_TEST_RUNNING"; else exit 1; fi' : "exit 0"}\n`);
       chmodSync(path, 0o755);
     }
-    const result = Bun.spawnSync(["/bin/bash", join(root, "tools/run-mod.sh"), ...args], { env: { ...process.env, PATH: `${root}/stubs:/usr/bin:/bin`, ARC_TEST_TRACE: root, ARC_TEST_RUNNING: options.running ?? "" }, stdout: "pipe", stderr: "pipe" });
+    const result = Bun.spawnSync(["/bin/bash", join(root, "tools/run-mod.sh"), ...args], { env: { ...process.env, PATH: `${root}/stubs:/usr/bin:/bin`, ARC_TEST_TRACE: root, ARC_TEST_RUNNING: options.running ?? "", ARCMOD_INSTALL_DIR: join(root, "Applications") }, stdout: "pipe", stderr: "pipe" });
     const recorded = (command: string): string[] => existsSync(join(root, command)) ? readFileSync(join(root, command), "utf8").split("\0").slice(0, -1) : [];
     return { success: result.success, stderr: result.stderr.toString(), stdout: result.stdout.toString(), open: recorded("open"), defaults: recorded("defaults"), mkdir: recorded("mkdir"), pgrep: recorded("pgrep"), root };
   } finally {
@@ -70,10 +70,10 @@ const launch = (args: readonly string[], options: { readonly running?: string; r
 
 describe("launcher argument semantics", () => {
   test("default and validation launches preserve their isolation", () => {
-    for (const [args, name, domain] of [[[], "ArcMod", "company.thebrowser.Browser.mod"], [["--validation"], "ArcModValidation", "company.thebrowser.Browser.mod.validation"]] as const) {
+    for (const [args, folder, name, domain] of [[[], "Applications", "ArcMod", "dev.drshnk.arcmod"], [["--validation"], "build", "ArcModValidation", "company.thebrowser.Browser.mod.validation"]] as const) {
       const result = launch(args);
       expect(result.success).toBe(true);
-      expect(result.open).toContain(`${result.root}/build/${name}.app`);
+      expect(result.open).toContain(`${result.root}/${folder}/${name}.app`);
       expect(result.defaults).toContain(domain);
       expect(result.open).not.toContain("-g");
     }

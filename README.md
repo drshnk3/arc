@@ -27,19 +27,21 @@ git lfs install
 git clone https://github.com/CryogenicPlanet/arc.git
 cd arc
 bun install
-bun tools/build-mod.ts   # builds build/ArcMod.app
-tools/run-mod.sh         # launches ArcMod
+bun tools/build-mod.ts   # builds and installs /Applications/ArcMod.app
+open -a ArcMod
 ```
 
 That's it. The build takes about a minute the first time and a few seconds after that.
 
 What just happened? ArcMod only builds from Arc **1.168.0**, and the repo includes a copy of it
 in `bin/`. The builder uses `/Applications/Arc.app` while it's still 1.168.0; otherwise it
-unpacks the included copy into `build/source/` once. Then it patches a copy of that app and
-signs it on your Mac.
+unpacks the included copy into `build/source/` once. Then it patches a copy of that app, signs it
+on your Mac and installs it as `/Applications/ArcMod.app`.
 
-- Always start ArcMod with `tools/run-mod.sh`. It applies the service blocking that Chromium
-  needs at launch.
+- Open ArcMod like any app: from Applications, Launchpad, Spotlight or the Dock, or make it your
+  default browser. It applies the service blocking that Chromium needs however it's opened.
+  `tools/run-mod.sh` still works too. To install somewhere else, set `ARCMOD_INSTALL_DIR`
+  (for example `~/Applications`) for the build, updates and `tools/run-mod.sh`.
 - Quit ArcMod before you rebuild.
 - The clone downloads about 730 MB through Git LFS: about 380 MB of Arc in `bin/` and about
   350 MB of reverse-engineering files. To skip the latter, clone with
@@ -110,9 +112,9 @@ The **ArcMod** menu in the menu bar has a few switches:
 
 - Arc account features: sync across devices, Arc Max AI features, and calendar and email
   previews.
-- iCloud, push notifications, and passkeys stored in iCloud Keychain or with Touch ID (see
-  [Passkeys](#passkeys)). The copy is re-signed on your Mac, and Apple ties those features to
-  Arc's original signature.
+- iCloud and push notifications. The copy is re-signed on your Mac, and Apple ties those
+  features to Arc's original signature. Passkeys on this Mac work if you sign ArcMod with your own
+  Apple Developer certificate (see [Passkeys](#passkeys)).
 - Arc's own updates. ArcMod stays on Arc 1.168.0 and updates only from this repo.
 
 ## Bring your logins over
@@ -131,6 +133,29 @@ account data aren't copied. To run it from a terminal instead, quit both browser
 - ArcMod uses Chromium's mock keychain, so imported logins are protected only by a public key.
   Don't import on a shared Mac.
 
+### From Chrome
+
+**ArcMod → Import from Chrome…** turns each Google Chrome profile into an ArcMod profile with a
+Space of the same name. Each one gets that profile's cookies, site storage, extensions, history
+and passwords, and its bookmarks are pinned in the Space as a **Bookmarks** folder that mirrors
+Chrome's folders (Bookmarks Bar, Other Bookmarks, Mobile Bookmarks). Terminal asks ArcMod to quit,
+waits for you to quit Chrome, imports and reopens ArcMod.
+
+From a terminal, with both browsers closed:
+
+```sh
+bun tools/import-chrome-profiles.ts --list                  # Chrome's profile folders and names
+bun tools/import-chrome-profiles.ts                         # import every profile not imported yet
+bun tools/import-chrome-profiles.ts --profile "Profile 2"   # or only some
+```
+
+- macOS asks to read "Chrome Safe Storage". Choose **Allow**, not "Always Allow".
+- If Terminal can't read Chrome's folder, give it Full Disk Access in **System Settings →
+  Privacy & Security**.
+- Chrome is only read. Profiles imported before are skipped; delete the Space in ArcMod to import
+  one again. ArcMod's sidebar and profile list are backed up as
+  `*.pre-chrome-import-<timestamp>`.
+
 ## Agent browser tools
 
 `tools/agent-mcp.ts` is a local stdio MCP server. Register it with your client, for example
@@ -147,20 +172,49 @@ browsers don't take focus or touch your own ArcMod windows.
 
 ## Passkeys
 
-| Passkey | In ArcMod |
-| --- | --- |
-| Saved in iCloud Keychain or on this Mac with Touch ID | **Doesn't work** |
-| On your phone ("Use a phone or tablet", scan the QR code) | Should work; not tested yet |
-| Hardware security key (YubiKey and similar) | Should work; not tested yet |
-| Password-manager extension that handles passkeys (1Password, Bitwarden) | Should work; not tested yet |
+| Passkey | Ad hoc build (default) | Signed with your certificate |
+| --- | --- | --- |
+| Saved on this Mac with Touch ID (in ArcMod's profile) | **Doesn't work** | Works |
+| Saved in iCloud Keychain / Apple Passwords | **Doesn't work** | Only if Apple grants your team the browser passkey entitlement |
+| On your phone ("Use a phone or tablet", scan the QR code) | Should work; not tested yet | Should work |
+| Hardware security key (YubiKey and similar) | Should work; not tested yet | Should work |
+| Password-manager extension that handles passkeys (1Password, Bitwarden) | Should work; not tested yet | Should work |
 
-macOS only lets a browser use iCloud Keychain and Touch ID passkeys when Apple has granted its
-developer a passkey entitlement, and the app carries that developer's signature. Arc had one;
-ArcMod is re-signed on your Mac, so it can't. The other three don't need the entitlement. The
-phone option uses Bluetooth, and macOS may ask for permission again after each rebuild.
+Passkeys on this Mac live in the Keychain, and macOS gives a Keychain group only to apps signed by
+the team that owns it. Arc used its own team's groups; an ad hoc copy has none. With a paid Apple
+Developer account you can sign ArcMod yourself, and the builder moves those groups to your team.
 
-Native passkeys will need a signed ArcMod release from a developer with Apple's passkey
-entitlement. That's planned. Builds from source stay without native passkeys.
+1. In [Certificates, Identifiers & Profiles](https://developer.apple.com/account/resources/identifiers/list),
+   register a **macOS App ID** for ArcMod's bundle ID, `dev.drshnk.arcmod` (`tools/agent-session.ts`).
+   It needs no capabilities.
+2. Create a **Developer ID** provisioning profile (macOS → Developer ID) for that App ID and your
+   Developer ID Application certificate, and download it.
+3. Write `~/.arcmod/signing.json`:
+
+   ```json
+   {
+     "identity": "Developer ID Application: Your Name (TEAMID)",
+     "profile": "~/.arcmod/ArcMod.provisionprofile"
+   }
+   ```
+
+   `security find-identity -v -p codesigning` lists your certificates; the SHA-1 works too.
+4. Quit ArcMod and run `bun tools/build-mod.ts`. The build checks that the profile is for macOS,
+   for `<TEAMID>.dev.drshnk.arcmod`, unexpired and made for that certificate, then signs with it.
+   The first time, macOS asks to let `codesign` use your key: choose **Always Allow**.
+
+Updates and rebuilds keep signing while `~/.arcmod/signing.json` exists; delete it to go back to
+ad hoc. Only the normal ArcMod is signed; test and agent builds stay ad hoc. A stable signature
+also means macOS stops asking for Bluetooth and Keychain permission again after each rebuild.
+
+**iCloud Keychain passkeys** need one more entitlement,
+`com.apple.developer.web-browser.public-key-credential`, which Apple grants only on request. The
+request form is linked from
+[the entitlement's documentation](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.web-browser.public-key-credential)
+and has to come from the team's Account Holder. Developers who have applied report that Apple
+grants it to Organization accounts (not individual memberships) and asks for the browser's bundle
+ID, a download link and whether it supports WebAuthn. Once it's granted, enable it on the App ID,
+download the profile again and rebuild: the builder adds the entitlement whenever the profile has it.
 
 ## Status
 
@@ -177,8 +231,10 @@ Then it:
 2. Applies small, fingerprinted patches to Arc's Swift app layer. The patcher refuses to run if
    the bytes don't match Arc 1.168.0 exactly.
 3. Injects `ArcMod.dylib`, an Objective-C module that filters service requests, enables local
-   menu actions and adds the ArcMod menu.
-4. Re-signs the copy ad hoc.
+   menu actions, adds the ArcMod menu and adds ArcMod's Chromium switches when it's opened
+   without `tools/run-mod.sh`.
+4. Re-signs the copy ad hoc, or with your certificate (see [Passkeys](#passkeys)), and installs it
+   in `/Applications`.
 
 Arc's engine is left as it is unless you build with `--engine`.
 [local-mode.md](notes/local-mode.md) and the

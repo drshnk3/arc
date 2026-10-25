@@ -5,12 +5,15 @@
 //   - arm64 executable, required ArcMod.dylib, fingerprinted local UI/URL/single-Little-Arc patches
 //   - every nested binary re-signed ad hoc, inside-out, WITHOUT hardened runtime (so no library
 //     validation) and without Arc's restricted entitlements (iCloud, keychain groups, push)
+//   - or, for the normal ArcMod with ~/.arcmod/signing.json, signed with your certificate and provisioning
+//     profile and entitled to your team's keychain groups for passkeys (tools/signing.ts)
+//   - the normal ArcMod is installed as /Applications/ArcMod.app; test and agent builds stay in build/
 // /Applications/Arc.app is never modified.
 //
 //   bun tools/build-mod.ts [--source /Applications/Arc.app] [--validation | --agent <slug>]
 //                          [--engine <ArcCore.framework> | --engine release]   (Arc Engine; see README)
 
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 import { hostResolverRules, servicePolicyHeader } from "./service-policy";
@@ -20,8 +23,9 @@ import { fetchEngine } from "./fetch-engine";
 import { finalApp, runningApp, stagedApp, swapInStagedApp } from "./build-paths";
 import { currentChannel, describeArgs } from "./update";
 import { verifyShippedShortcutCoverage } from "./shortcut-coverage";
-import { parseBuildOptions } from "./agent-session";
+import { parseBuildOptions, sessionIdentity } from "./agent-session";
 import { acquireLease } from "./agent-lease";
+import { retargetKeychainGroups, signingConfigPath, signingFor } from "./signing";
 
 // All bundles share generated headers/dylib, so serialize complete builds.
 const buildLease = acquireLease("global", join(homedir(), ".arcmod", "build-locks"));
@@ -76,6 +80,11 @@ const version = sh(["defaults", "read", join(SOURCE, "Contents/Info.plist"), "CF
 const build = sh(["defaults", "read", join(SOURCE, "Contents/Info.plist"), "CFBundleVersion"]).trim();
 if (version !== "1.168.0" || build !== "88413") throw new Error(`unsupported Arc ${version} (${build}); local-mode patch targets 1.168.0 (88413)`);
 step(`source ${SOURCE} (Arc ${version})`);
+// Checked before anything is built, so a wrong certificate or profile fails fast.
+const signing = MOD_BUNDLE_ID === sessionIdentity().bundleId ? signingFor(MOD_BUNDLE_ID) : undefined;
+step(signing
+  ? `signing: ${signing.identity} with "${signing.profile.name}" (team ${signing.profile.team})`
+  : `signing: ad hoc${MOD_BUNDLE_ID === sessionIdentity().bundleId ? ` (no ${signingConfigPath()})` : ""}`);
 step(`verify complete menu coverage (${verifyShippedShortcutCoverage(SOURCE).length} actions)`);
 step("verify native Foundation formatting ABI for compact state serialization");
 console.log(`  ${sh(["xcrun", "swift", "-O", join(root, "tools/verify-foundation-abi.swift")]).trim()}`);
@@ -84,12 +93,20 @@ writeFileSync(join(root, "build/ArcModServiceHosts.h"), servicePolicyHeader);
 writeFileSync(join(root, "build/ArcModShortcutPolicy.h"), shortcutPolicyHeader);
 
 const dylib = join(root, "build/ArcMod.dylib");
+const switches = join(root, "build/LaunchSwitches.o");
 step("compile mods/hello/ArcMod.m → build/ArcMod.dylib");
+sh([
+  "xcrun", "swiftc", "-c", "-parse-as-library", "-O", "-target", "arm64-apple-macos13.0", "-module-name", "ArcModLaunchSwitches",
+  "-o", switches, join(root, "mods/hello/LaunchSwitches.swift"),
+]);
+const sdk = sh(["xcrun", "--show-sdk-path"]).trim();
 sh([
   "clang", "-dynamiclib", "-arch", "arm64", "-fobjc-arc", "-Wall", "-Wextra", "-Werror", "-mmacosx-version-min=13.0",
   "-framework", "AppKit", "-framework", "CoreServices", "-I", join(root, "build"), "-install_name", DYLIB_INSTALL, "-o", dylib,
+  // The Swift runtime ships with macOS 13.
+  "-L", join(sdk, "usr/lib/swift"), "-Wl,-rpath,/usr/lib/swift",
   join(root, "mods/hello/ArcMod.m"), join(root, "mods/local/ServicePolicy.m"),
-  join(root, "mods/local/ShortcutPolicy.m"),
+  join(root, "mods/local/ShortcutPolicy.m"), switches,
 ]);
 
 step(`APFS-clone app → ${relative(root, OUT)}`);
@@ -137,7 +154,18 @@ const describe = Bun.spawnSync(["git", "-C", root, "describe", "--tags", "--alwa
 plutil("-insert", "ArcModVersion", "-string", describe || "unknown");
 plutil("-insert", "ArcModBuildEngine", "-string", options.engine === "release" ? "release" : ENGINE ?? "arc");
 plutil("-insert", "ArcModRepository", "-string", root);
-const shownName = session.agent === undefined && MOD_BUNDLE_ID === "company.thebrowser.Browser.mod"
+// ArcMod used Arc's bundle ID with a ".mod" suffix before. Its settings (machineID, which Spaces use to name their
+// profile, the shown name and the ArcMod menu's switches) move to the new ID once.
+const LEGACY_BUNDLE_ID = "company.thebrowser.Browser.mod";
+const hasSettings = (domain: string): boolean => Bun.spawnSync(["defaults", "read", domain, "machineID"]).success;
+if (MOD_BUNDLE_ID === sessionIdentity().bundleId && !hasSettings(MOD_BUNDLE_ID) && hasSettings(LEGACY_BUNDLE_ID)) {
+  step(`settings: ${LEGACY_BUNDLE_ID} → ${MOD_BUNDLE_ID}`);
+  const exported = join(root, "build", "legacy-settings.plist");
+  sh(["defaults", "export", LEGACY_BUNDLE_ID, exported]);
+  sh(["defaults", "import", MOD_BUNDLE_ID, exported]);
+  rmSync(exported, { force: true });
+}
+const shownName = MOD_BUNDLE_ID === sessionIdentity().bundleId
   ? Bun.spawnSync(["defaults", "read", MOD_BUNDLE_ID, "ArcModAppName"]).stdout.toString().trim()
   : "";
 if (shownName) {
@@ -152,6 +180,7 @@ if (shownName) {
   });
 }
 rmSync(join(OUT, "Contents/embedded.provisionprofile"), { force: true });
+if (signing) copyFileSync(signing.profilePath, join(OUT, "Contents/embedded.provisionprofile"));
 
 step("main executable: thin to arm64, strip signature, apply local patches, insert required dylib");
 const exe = join(OUT, "Contents/MacOS/Arc");
@@ -162,8 +191,25 @@ console.log(`  ${sh(["bun", join(root, "tools/patch-local-mode.ts"), exe]).trim(
 console.log(`  ${sh(["bun", join(root, "tools/insert-dylib.ts"), exe, DYLIB_INSTALL, "--strong"]).trim()}`);
 sh(["cp", dylib, join(OUT, "Contents/Frameworks/ArcMod.dylib")]);
 
+let entitlements: string | undefined;
+if (signing) {
+  step(`keychain access groups: Arc's team → ${signing.profile.team}`);
+  for (const binary of [exe, join(OUT, "Contents/Frameworks/ArcCore.framework/Versions/A/ArcCore")]) {
+    const result = retargetKeychainGroups(readFileSync(binary), signing.profile.team);
+    // Chromium's passkey store lives in ArcCore; without its group, Touch ID passkeys stay unavailable.
+    if (result.count === 0 && binary !== exe) throw new Error(`no keychain access groups found in ${relative(OUT, binary)}`);
+    writeFileSync(binary, result.binary);
+    console.log(`  ${relative(OUT, binary)}: ${result.count} group names`);
+  }
+  entitlements = join(root, "build", `${appName}.entitlements`);
+  writeFileSync(entitlements, JSON.stringify(signing.entitlements));
+  sh(["plutil", "-convert", "xml1", entitlements]);
+}
+
 // Inside-out: loose Mach-O files that aren't a bundle's main executable, then bundles deepest first.
-step("re-sign ad hoc, inside-out (no hardened runtime, no entitlements)");
+step(signing
+  ? "re-sign with your certificate, inside-out (no hardened runtime; entitlements on the app only)"
+  : "re-sign ad hoc, inside-out (no hardened runtime, no entitlements)");
 const all = walk(OUT);
 const bundles = all.filter((p) => CODE_BUNDLE.test(p) && statSync(p).isDirectory() && p !== OUT);
 const bundleMains = new Set(
@@ -174,7 +220,10 @@ const bundleMains = new Set(
 );
 const loose = all.filter((p) => !bundleMains.has(p) && !p.startsWith(exe) && isMachO(p));
 const ordered = [...loose.toSorted((a, b) => depth(b) - depth(a)), ...bundles.toSorted((a, b) => depth(b) - depth(a)), OUT];
-const sign = (p: string): void => void sh(["codesign", "--force", "--sign", "-", "--timestamp=none", p], { quiet: true });
+const sign = (p: string): void => void sh([
+  "codesign", "--force", "--sign", signing?.identity ?? "-", "--timestamp=none",
+  ...(p === OUT && entitlements ? ["--entitlements", entitlements] : []), p,
+], { quiet: true });
 ordered.forEach((p) => {
   sign(p);
   console.log(`  signed ${relative(OUT, p) || "ArcMod.app"}`);
@@ -184,10 +233,16 @@ step("verify");
 sh(["codesign", "--verify", "--deep", "--strict", OUT], { quiet: true });
 const loads = sh(["otool", "-L", exe]).split("\n").filter((l) => l.includes("ArcMod"));
 console.log(`  codesign --verify --deep --strict: ok\n  ${loads.join("\n  ").trim()}`);
+if (signing) {
+  const signed = sh(["codesign", "-d", "--entitlements", "-", "--xml", OUT], { quiet: true });
+  const missing = Object.keys(signing.entitlements).filter((key) => !signed.includes(`<key>${key}</key>`));
+  if (missing.length > 0) throw new Error(`the signed app is missing entitlements: ${missing.join(", ")}`);
+  console.log(`  entitlements: ${Object.keys(signing.entitlements).join(", ")}`);
+}
 if (options.stageOnly) {
   console.log(`\nstaged ${relative(root, OUT)} from Arc ${version}`);
 } else {
   assertOutputStopped();
   swapInStagedApp(appName);
-  console.log(`\nbuilt ${relative(root, FINAL)} from Arc ${version}`);
+  console.log(`\nbuilt ${FINAL} from Arc ${version}`);
 }

@@ -28,7 +28,7 @@ export const sessionIdentity = (validation = false, agent?: string): SessionIden
   }
   return {
     appName: validation ? "ArcModValidation" : "ArcMod",
-    bundleId: validation ? "company.thebrowser.Browser.mod.validation" : "company.thebrowser.Browser.mod",
+    bundleId: validation ? "company.thebrowser.Browser.mod.validation" : "dev.drshnk.arcmod",
     // macOS shows a localized name (ArcMod menu → Rename App…) only when this matches the bundle's folder name.
     displayName: validation ? "Arc Mod Test" : "ArcMod",
     agent: undefined,

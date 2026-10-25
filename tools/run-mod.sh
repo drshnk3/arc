@@ -47,7 +47,7 @@ if [[ -n "$CDP_PORT" ]]; then
 fi
 [[ $GUARD == 0 || $BACKGROUND == 0 ]] || fail "--background requires a LaunchServices launch and cannot be combined with --guard"
 APP_NAME=ArcMod
-DOMAIN=company.thebrowser.Browser.mod
+DOMAIN=dev.drshnk.arcmod
 if [[ $VALIDATION == 1 ]]; then APP_NAME=ArcModValidation; DOMAIN=company.thebrowser.Browser.mod.validation; fi
 if [[ -n "$AGENT" ]]; then
   APP_NAME="ArcModAgent-$AGENT"
@@ -63,6 +63,8 @@ if [[ -n "$AGENT" ]]; then
   done
 fi
 APP="$ROOT/build/$APP_NAME.app"
+# The normal ArcMod is installed in /Applications; see tools/build-paths.ts.
+[[ $APP_NAME != ArcMod ]] || APP="${ARCMOD_INSTALL_DIR:-/Applications}/ArcMod.app"
 EXE="$APP/Contents/MacOS/Arc"
 DATA="$HOME/Library/Application Support/$APP_NAME"
 LOG="$ROOT/build/$APP_NAME-run.log"
