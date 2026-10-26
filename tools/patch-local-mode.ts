@@ -3,6 +3,7 @@
 // manufacturing an AuthSession or changing any authentication result.
 // Also enables local window/URL routing and restores single Little Arc reuse.
 // Performance: compact Storable JSON and initialize LaunchDarkly offline.
+// The hidden sidebar reveals as soon as the pointer reaches the window's left edge.
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { shortcutBridge, shortcutBridgeOffset } from "./shortcut-bridge";
@@ -91,6 +92,16 @@ localSavedWindowRestore.set(Buffer.from("1f2003d5", "hex"), 20);
 const appIconAvailability = Buffer.from("1f040071c1010054e0031caa850000943f1f0072e0079f1a21008052", "hex");
 const localAppIconAvailability = Buffer.from(appIconAvailability);
 localAppIconAvailability.set(Buffer.from("00008052", "hex"), 20); // mov w0, #0 (was cset w0, ne)
+// Hidden sidebar: WindowHoverTracker gives its left-edge HoverRegions a lingerRequirement
+// (InnerLeftEdge 0.15 s, shared in x28; OuterLeftEdge 0.16 s) that HoverRegionTracker waits out
+// with asyncAfter before reporting hasLingered, which reveals the sidebar. Store 0 for those two
+// regions only, so it reveals on the next main-queue turn. Other regions keep x28's 0.15 s.
+const innerLeftEdgeLinger = Buffer.from("20c30091e10315aafdf8d594fc3300f9e80240f9", "hex");
+const instantInnerLeftEdgeLinger = Buffer.from(innerLeftEdgeLinger);
+instantInnerLeftEdgeLinger.set(Buffer.from("ff3300f9", "hex"), 12); // str xzr,[sp,#0x60] (was x28)
+const outerLeftEdgeLinger = Buffer.from("688f82d2c8f5a8f2285ccff288f8e7f2e83300f9880240f9", "hex");
+const instantOuterLeftEdgeLinger = Buffer.from(outerLeftEdgeLinger);
+instantOuterLeftEdgeLinger.set(Buffer.from("ff3300f9", "hex"), 16); // str xzr,[sp,#0x60] (was x8 = 0.16)
 const patches: readonly Patch[] = [
   { address: 0x10186b3b0n, original: onboarding, replacement: localOnboarding },
   { address: windowAddress, original: Buffer.from("000080d2678f8697f40300aa08805ff8081940f9e00316aa21008052e20314aa00013fd61f04007101070054", "hex"), replacement: localWindow },
@@ -107,6 +118,8 @@ const patches: readonly Patch[] = [
   { address: 0x100000000n + BigInt(localCloseBridgeOffset), original: Buffer.alloc(localCloseBridge.length), replacement: localCloseBridge },
   { address: 0x102ab2f34n, original: savedWindowRestore, replacement: localSavedWindowRestore },
   { address: 0x101eee7dcn, original: appIconAvailability, replacement: localAppIconAvailability },
+  { address: 0x100030800n, original: innerLeftEdgeLinger, replacement: instantInnerLeftEdgeLinger },
+  { address: 0x100030888n, original: outerLeftEdgeLinger, replacement: instantOuterLeftEdgeLinger },
 ];
 
 export const patchLocalMode = (source: Buffer): Buffer => {
@@ -155,5 +168,5 @@ if (import.meta.main) {
   const allowed = names.flatMap((name) => [finalApp(name), stagedApp(name)].map((app) => join(app, "Contents/MacOS/Arc")));
   if (!file || !allowed.some((path) => realpathSync(file) === join(path))) throw new Error("patch only an ArcMod build executable");
   writeFileSync(file, patchLocalMode(readFileSync(file)));
-  console.log("local mode: onboarding disabled, local windows and single Little Arc enabled; performance: compact state JSON, LaunchDarkly offline; account state unchanged");
+  console.log("local mode: onboarding disabled, local windows and single Little Arc enabled; performance: compact state JSON, LaunchDarkly offline; instant hidden-sidebar reveal; account state unchanged");
 }
