@@ -426,17 +426,44 @@ static void ArcModRemoveWindowBadges(void) {
 			if ([child.identifier isEqualToString:@"ArcModBadge"]) [child removeFromSuperview];
 }
 
-static void ArcModEnsureLocalWindow(void) {
+// At launch any browser window counts, since a restored one may not be shown yet. On reopen only a shown or
+// minimized one does: a window closed with the red X can stay alive hidden, and AppKit restores a minimized one.
+static void ArcModEnsureLocalWindow(BOOL reopen) {
 	BOOL hasBrowserWindow = NO;
 	for (NSWindow *window in NSApp.windows) {
 		NSString *name = NSStringFromClass(window.class);
-		if ([name isEqualToString:@"Arc.BrowserWindow"] || [name isEqualToString:@"Arc.LittleBrowserWindow"]) hasBrowserWindow = YES;
+		if (![name isEqualToString:@"Arc.BrowserWindow"] && ![name isEqualToString:@"Arc.LittleBrowserWindow"]) continue;
+		if (!reopen || window.isVisible || window.isMiniaturized) hasBrowserWindow = YES;
 	}
 	SEL action = NSSelectorFromString(@"createNewWindow");
 	if (!hasBrowserWindow && [NSApp.delegate respondsToSelector:action]) {
-		ArcModLog(@"creating local browser window (no account session)");
+		ArcModLog(@"creating local browser window (no account session%@)", reopen ? @", reopen" : @"");
 		((void (*)(id, SEL))objc_msgSend)(NSApp.delegate, action);
 	}
+}
+
+// Arc creates a window on reopen (Spotlight, the Dock, `open`) only with an account session, so reopening
+// ArcMod after its last window closed showed no window. Let Arc handle the reopen, then add the local window.
+typedef BOOL (*ShouldHandleReopenIMP)(id, SEL, NSApplication *, BOOL);
+static ShouldHandleReopenIMP gOriginalShouldHandleReopen;
+
+static BOOL ArcModShouldHandleReopen(id self, SEL _cmd, NSApplication *app, BOOL hasVisibleWindows) {
+	BOOL handled = gOriginalShouldHandleReopen(self, _cmd, app, hasVisibleWindows);
+	if (!hasVisibleWindows)
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ ArcModEnsureLocalWindow(YES); });
+	return handled;
+}
+
+static void ArcModInstallReopenHook(void) {
+	Class delegate = NSClassFromString(@"Arc.AppDelegate");
+	SEL selector = @selector(applicationShouldHandleReopen:hasVisibleWindows:);
+	Method method = delegate ? class_getInstanceMethod(delegate, selector) : NULL;
+	if (!method || gOriginalShouldHandleReopen) return;
+	gOriginalShouldHandleReopen = (ShouldHandleReopenIMP)method_getImplementation(method);
+	// Add an override if the method is inherited, rather than mutating a superclass.
+	if (!class_addMethod(delegate, selector, (IMP)ArcModShouldHandleReopen, method_getTypeEncoding(method)))
+		method_setImplementation(method, (IMP)ArcModShouldHandleReopen);
+	ArcModLog(@"reopen window fallback installed");
 }
 
 static void ArcModConsolidateLittleWindows(NSWindow *preferred) {
@@ -1368,7 +1395,11 @@ __attribute__((constructor)) static void ArcModInit(void) {
 		[NSTimer scheduledTimerWithTimeInterval:60 * 60 repeats:YES block:^(__unused NSTimer *timer) { checkIfDue(); }];
 		// With "restore windows" on, give Arc's own restore time first so a slow launch doesn't get an extra window.
 		int64_t fallback = [NSUserDefaults.standardUserDefaults boolForKey:@"arc_quitAlwaysKeepsWindows"] ? 3 : 1;
-		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, fallback * (int64_t)NSEC_PER_SEC), dispatch_get_main_queue(), ^{ ArcModEnsureLocalWindow(); });
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, fallback * (int64_t)NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+			ArcModEnsureLocalWindow(NO);
+			// Only now: a reopen during launch would otherwise add a window before Arc's restore finished.
+			ArcModInstallReopenHook();
+		});
 		// Arc rebuilds its main menu after launch; install once it has settled, and again later as a fallback.
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ ArcModInstallMenu(); ArcModInstallWindowBadges(); });
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ ArcModInstallMenu(); ArcModInstallWindowBadges(); });
