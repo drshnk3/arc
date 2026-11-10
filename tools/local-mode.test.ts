@@ -20,8 +20,8 @@ describe.skipIf(!existsSync(binary))("Arc 1.168.0 local-mode binary patch", () =
     expect(Bun.hash(original)).toBe(originalDigest);
     const changed: number[] = [];
     original.forEach((byte, i) => { if (byte !== patched[i]) changed.push(i); });
-    expect(changed.length).toBe(301);
-    expect(changed.every((i) => i === 0x186b3ec || i === 0x1af800 || i === 0x31cb04 || (i >= 0x313cd0 && i < 0x313cd4) || (i >= shortcutBridgeOffset && i < shortcutBridgeOffset + shortcutBridge.length) || (i >= localCloseBridgeOffset && i < localCloseBridgeOffset + localCloseBridge.length) || (i >= 0x2a3ade8 && i < 0x2a3adec) || (i >= 0x2ab2f48 && i < 0x2ab2f4c) || (i >= 0x2a75744 && i < 0x2a75770) || (i >= 0x2a7cb60 && i < 0x2a7cb64) || (i >= littleArcBridgeOffset && i < littleArcBridgeOffset + littleArcBridge.length) || (i >= 0xdab528 && i < 0xdab52c) || i === 0x143426c || (i >= 0x1f5f79c && i < 0x1f5f7a4) || (i >= 0x1eee7f0 && i < 0x1eee7f4))).toBe(true);
+    expect(changed.length).toBe(303);
+    expect(changed.every((i) => i === 0x186b3ec || i === 0x1af800 || i === 0x31cb04 || (i >= 0x313cd0 && i < 0x313cd4) || (i >= shortcutBridgeOffset && i < shortcutBridgeOffset + shortcutBridge.length) || (i >= localCloseBridgeOffset && i < localCloseBridgeOffset + localCloseBridge.length) || (i >= 0x2a3ade8 && i < 0x2a3adec) || (i >= 0x2ab2f48 && i < 0x2ab2f4c) || (i >= 0x2a75744 && i < 0x2a75770) || (i >= 0x2a7cb60 && i < 0x2a7cb64) || (i >= littleArcBridgeOffset && i < littleArcBridgeOffset + littleArcBridge.length) || (i >= 0xdab528 && i < 0xdab52c) || i === 0x143426c || (i >= 0x1f5f79c && i < 0x1f5f7a4) || (i >= 0x1eee7f0 && i < 0x1eee7f4) || i === 0x3080c || i === 0x30898)).toBe(true);
     // The new call must destroy the optional session, and the branch must reach local bootstrap.
     const target = (offset: number): number => {
       const immediate = patched.readUInt32LE(offset) & 0x3ffffff;
@@ -82,6 +82,17 @@ describe.skipIf(!existsSync(binary))("Arc 1.168.0 local-mode binary patch", () =
     expect(original.readUInt32LE(0x1eee7f0)).toBe(0x1a9f07e0);
     expect(patched.subarray(0x1eee6d4, 0x1eee7f0)).toEqual(original.subarray(0x1eee6d4, 0x1eee7f0));
     expect(patched.subarray(0x1eee7f4, 0x1eee9ac)).toEqual(original.subarray(0x1eee7f4, 0x1eee9ac));
+  });
+
+  test("hidden sidebar: only the two left-edge hover regions lose their linger", () => {
+    expect(original.readUInt32LE(0x3080c)).toBe(0xf90033fc); // str x28,[sp,#0x60]: InnerLeftEdge, 0.15 s
+    expect(original.readUInt32LE(0x30898)).toBe(0xf90033e8); // str x8,[sp,#0x60]: OuterLeftEdge, 0.16 s
+    expect(patched.readUInt32LE(0x3080c)).toBe(0xf90033ff); // str xzr
+    expect(patched.readUInt32LE(0x30898)).toBe(0xf90033ff);
+    // x28 still holds 0.15 s for the traffic-light, sidebar, window and top-left regions.
+    expect(patched.subarray(0x30670, 0x3080c)).toEqual(original.subarray(0x30670, 0x3080c));
+    expect(patched.subarray(0x30810, 0x30898)).toEqual(original.subarray(0x30810, 0x30898));
+    expect(patched.subarray(0x3089c, 0x30b74)).toEqual(original.subarray(0x3089c, 0x30b74));
   });
 
   test("local saved-window restore preserves state destruction and native saved-data checks", () => {
